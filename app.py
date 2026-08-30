@@ -1787,38 +1787,25 @@ def inspection(assignment_id):
 
     <script>
 
-    function getLocation() {
+function getLocation() {{
 
-        if (navigator.geolocation) {
+    if (navigator.geolocation) {{
 
-            navigator.geolocation.getCurrentPosition(
+        navigator.geolocation.getCurrentPosition(
 
-                function(position) {
+            function(position) {{
 
-                    document.getElementById(
-                        "latitude"
-                    ).value =
-                        position.coords.latitude;
+                // location code
 
-                    document.getElementById(
-                        "longitude"
-                    ).value =
-                        position.coords.longitude;
+            }},
 
-                    alert(
-                        "📍 Location captured successfully!"
-                    );
-                },
+            function() {{
+                alert("Please allow location permission.");
+            }}
+        );
 
-                function() {
-
-                    alert(
-                        "❌ Please allow location permission."
-                    );
-                }
-            );
-        }
-
+    }}
+}}
         else {
 
             alert(
