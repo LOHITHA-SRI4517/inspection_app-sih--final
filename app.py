@@ -1,13 +1,18 @@
 from flask import (
     Flask, request, redirect, url_for,
-    session, send_from_directory
+    session, send_from_directory, jsonify
 )
+
 import sqlite3
 import os
 import uuid
 import random
+import html
 from datetime import datetime
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import (
+    generate_password_hash,
+    check_password_hash
+)
 
 
 # ============================================================
@@ -18,8 +23,8 @@ app = Flask(__name__)
 app.secret_key = "smart_inspection_system_2026_secure_key"
 
 DATABASE = "inspection.db"
-
 UPLOAD_FOLDER = "uploads"
+
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -48,20 +53,25 @@ def current_time():
 def allowed_file(filename):
     return (
         "." in filename
-        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+        and filename.rsplit(".", 1)[1].lower()
+        in ALLOWED_EXTENSIONS
     )
 
 
-def require_login():
-    return "user_id" in session
-
-
 def calculate_priority(report_count):
+    """
+    Priority Rules:
+    1 report       -> Low
+    2 or 3 reports -> Medium
+    More than 3    -> High
+    """
 
-    if report_count >= 4:
+    if report_count > 3:
         return "High"
+
     elif report_count >= 2:
         return "Medium"
+
     return "Low"
 
 
@@ -80,10 +90,21 @@ def priority_badge(priority):
     }
 
     return f"""
-    <span class="badge {classes.get(priority, '')}">
-        {icons.get(priority, '⚪')} {priority}
-    </span>
+        <span class="badge {classes.get(priority, '')}">
+            {icons.get(priority, '⚪')} {priority}
+        </span>
     """
+
+
+def require_login():
+    return "user_id" in session
+
+
+def role_required(*roles):
+    return (
+        require_login()
+        and session.get("role") in roles
+    )
 
 
 # ============================================================
@@ -94,7 +115,10 @@ def create_database():
 
     conn = get_connection()
 
+    # --------------------------------------------------------
     # USERS
+    # --------------------------------------------------------
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,19 +130,24 @@ def create_database():
         )
     """)
 
+    # --------------------------------------------------------
     # ASSIGNMENTS
+    # --------------------------------------------------------
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS assignments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             location TEXT NOT NULL,
-            inspection_type TEXT DEFAULT 'Routine',
             assigned_at TEXT NOT NULL,
             status TEXT DEFAULT 'Assigned'
         )
     """)
 
-    # ISSUES / REPORTS
+    # --------------------------------------------------------
+    # ISSUES / INSPECTION REPORTS
+    # --------------------------------------------------------
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS issues (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,12 +161,14 @@ def create_database():
             photo TEXT,
             reporter_id INTEGER,
             latitude TEXT,
-            longitude TEXT,
-            verified INTEGER DEFAULT 0
+            longitude TEXT
         )
     """)
 
+    # --------------------------------------------------------
     # CCTV
+    # --------------------------------------------------------
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cctv_feeds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,23 +178,45 @@ def create_database():
         )
     """)
 
+    # --------------------------------------------------------
     # MEETINGS
+    # --------------------------------------------------------
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meetings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             meeting_url TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            created_by INTEGER,
+            meeting_code TEXT UNIQUE
         )
     """)
 
-    # DEFAULT OFFICER
-    users = [
+    # --------------------------------------------------------
+    # MEETING PARTICIPANTS
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            joined_at TEXT NOT NULL,
+            UNIQUE(meeting_id, user_id)
+        )
+    """)
+
+    # ========================================================
+    # DEFAULT USERS
+    # ========================================================
+
+    default_users = [
         (
-            "OFF001",
-            "System Officer",
-            "officer123",
-            "Officer"
+            "ADMIN001",
+            "System Authority",
+            "admin123",
+            "Authority"
         ),
         (
             "INS001",
@@ -173,20 +226,20 @@ def create_database():
         ),
         (
             "WORK001",
-            "Field Worker",
+            "Demo Field Worker",
             "worker123",
             "Worker"
         )
     ]
 
-    for unique_id, name, password, role in users:
+    for unique_id, name, password, role in default_users:
 
-        user = conn.execute(
-            "SELECT id FROM users WHERE unique_id = ?",
-            (unique_id,)
-        ).fetchone()
+        existing = conn.execute("""
+            SELECT id FROM users
+            WHERE unique_id = ?
+        """, (unique_id,)).fetchone()
 
-        if user is None:
+        if existing is None:
 
             conn.execute("""
                 INSERT INTO users
@@ -208,7 +261,7 @@ create_database()
 
 
 # ============================================================
-# WEBSITE DESIGN
+# WEBSITE STYLE
 # ============================================================
 
 STYLE = """
@@ -226,7 +279,7 @@ body {
 }
 
 .navbar {
-    background: linear-gradient(90deg, #0f172a, #1d4ed8);
+    background: linear-gradient(90deg, #172033, #3159b7);
     color: white;
     padding: 17px 7%;
     display: flex;
@@ -236,15 +289,31 @@ body {
     gap: 12px;
 }
 
+.brand {
+    font-size: 19px;
+}
+
+.nav-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
 .navbar a {
     color: white;
     text-decoration: none;
-    margin-left: 14px;
+    padding: 8px;
     font-weight: bold;
+    font-size: 14px;
+}
+
+.navbar a:hover {
+    background: rgba(255,255,255,0.12);
+    border-radius: 7px;
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1250px;
     margin: auto;
     padding: 30px 20px;
 }
@@ -259,13 +328,24 @@ body {
 
 .hero {
     text-align: center;
-    padding: 75px 25px;
-    background: linear-gradient(135deg, #eff6ff, #eef2ff);
+    padding: 85px 25px;
+    background:
+        linear-gradient(
+            135deg,
+            #edf3ff,
+            #e9eef9
+        );
 }
 
 .hero h1 {
-    font-size: 42px;
-    color: #1e3a8a;
+    font-size: 48px;
+    color: #243f78;
+    margin-bottom: 20px;
+}
+
+.hero p {
+    font-size: 18px;
+    line-height: 1.6;
 }
 
 .btn {
@@ -279,6 +359,11 @@ body {
     text-decoration: none;
     margin: 4px;
     font-size: 14px;
+    font-weight: bold;
+}
+
+.btn:hover {
+    opacity: 0.9;
 }
 
 .btn-green {
@@ -299,15 +384,20 @@ body {
 
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    grid-template-columns:
+        repeat(auto-fit, minmax(230px, 1fr));
     gap: 18px;
 }
 
 .feature {
     background: white;
-    padding: 22px;
-    border-radius: 14px;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.06);
+    padding: 25px;
+    border-radius: 16px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+}
+
+.feature h3 {
+    color: #29467e;
 }
 
 input, select, textarea {
@@ -321,7 +411,8 @@ input, select, textarea {
 }
 
 textarea {
-    min-height: 100px;
+    min-height: 110px;
+    resize: vertical;
 }
 
 h1, h2, h3 {
@@ -330,10 +421,19 @@ h1, h2, h3 {
 
 .info {
     background: #eff6ff;
-    padding: 15px;
+    padding: 16px;
     border-left: 5px solid #2563eb;
-    border-radius: 7px;
+    border-radius: 8px;
     margin: 15px 0;
+    line-height: 1.6;
+}
+
+.notification {
+    background: #fff7ed;
+    padding: 20px;
+    border-left: 5px solid #ea580c;
+    border-radius: 10px;
+    margin-bottom: 20px;
 }
 
 .error {
@@ -341,11 +441,17 @@ h1, h2, h3 {
     font-weight: bold;
 }
 
+.success {
+    color: #047857;
+    font-weight: bold;
+}
+
 .badge {
-    padding: 6px 10px;
+    padding: 6px 11px;
     border-radius: 20px;
     font-size: 12px;
     font-weight: bold;
+    background: #e0e7ff;
 }
 
 .priority-low {
@@ -365,21 +471,22 @@ h1, h2, h3 {
 
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-template-columns:
+        repeat(auto-fit, minmax(180px, 1fr));
     gap: 18px;
     margin: 20px 0;
 }
 
 .stat-card {
     background: white;
-    padding: 22px;
+    padding: 24px;
     border-radius: 15px;
     text-align: center;
     box-shadow: 0 5px 18px rgba(0,0,0,0.08);
 }
 
 .stat-number {
-    font-size: 34px;
+    font-size: 35px;
     font-weight: bold;
     color: #2563eb;
 }
@@ -401,10 +508,18 @@ th, td {
 }
 
 .evidence-photo {
-    width: 100px;
-    height: 75px;
+    width: 110px;
+    height: 80px;
     object-fit: cover;
     border-radius: 8px;
+}
+
+.high-alert {
+    background: #fff1f2;
+    border-left: 5px solid #dc2626;
+    padding: 18px;
+    border-radius: 10px;
+    margin-bottom: 20px;
 }
 
 @media(max-width:700px) {
@@ -418,7 +533,11 @@ th, td {
     }
 
     .hero h1 {
-        font-size: 29px;
+        font-size: 31px;
+    }
+
+    table {
+        font-size: 13px;
     }
 }
 
@@ -427,7 +546,131 @@ th, td {
 
 
 # ============================================================
-# NAVBAR
+# 🔔 MEETING NOTIFICATION SCRIPT
+# ============================================================
+
+def notification_script():
+
+    if not require_login():
+        return ""
+
+    # Authority creates meetings, so notification is for
+    # Workers and Inspectors only
+    if session.get("role") not in ["Worker", "Inspector"]:
+        return ""
+
+    return """
+    <script>
+
+    let lastMeetingId =
+        localStorage.getItem("smartInspectionLastMeeting");
+
+    // Ask browser notification permission
+    if (
+        "Notification" in window &&
+        Notification.permission === "default"
+    ) {
+        Notification.requestPermission();
+    }
+
+
+    function checkForNewMeeting() {
+
+        fetch("/api/latest-meeting")
+
+        .then(response => response.json())
+
+        .then(data => {
+
+            if (!data.meeting) {
+                return;
+            }
+
+            const meeting = data.meeting;
+            const meetingId = String(meeting.id);
+
+
+            // First visit:
+            // Store the current meeting as reference
+            if (lastMeetingId === null) {
+
+                localStorage.setItem(
+                    "smartInspectionLastMeeting",
+                    meetingId
+                );
+
+                lastMeetingId = meetingId;
+                return;
+            }
+
+
+            // A new meeting was created
+            if (meetingId !== lastMeetingId) {
+
+                // Website popup
+                alert(
+                    "🔔 NEW TEAM MEETING!\\n\\n" +
+                    "👤 Created by: " +
+                    meeting.authority_name +
+                    "\\n\\n🎥 Meeting: " +
+                    meeting.title +
+                    "\\n\\nPlease attend the meeting!"
+                );
+
+
+                // Browser notification
+                if (
+                    "Notification" in window &&
+                    Notification.permission === "granted"
+                ) {
+
+                    const notification =
+                        new Notification(
+                            "🔔 New Inspection Meeting",
+                            {
+                                body:
+                                    meeting.authority_name +
+                                    " created: " +
+                                    meeting.title
+                            }
+                        );
+
+                    notification.onclick = function() {
+                        window.focus();
+                        window.location.href =
+                            meeting.meeting_url;
+                    };
+                }
+
+
+                localStorage.setItem(
+                    "smartInspectionLastMeeting",
+                    meetingId
+                );
+
+                lastMeetingId = meetingId;
+            }
+
+        })
+
+        .catch(error => {
+            console.log(
+                "Notification error:",
+                error
+            );
+        });
+    }
+
+
+    // Check every 3 seconds
+    setInterval(checkForNewMeeting, 3000);
+
+    </script>
+    """
+
+
+# ============================================================
+# NAVBAR - ROLE BASED
 # ============================================================
 
 def navbar():
@@ -435,36 +678,55 @@ def navbar():
     if not require_login():
         return ""
 
+    role = session.get("role")
+
     links = """
         <a href="/home">🏠 Home</a>
-        <a href="/dashboard">📊 Dashboard</a>
     """
 
-    # Worker and Inspector
-    if session["role"] in ["Worker", "Inspector"]:
-        links += """
-            <a href="/my-assignments">📋 My Assignments</a>
-        """
+    # Authority links
+    if role == "Authority":
 
-    # Officer
-    if session["role"] == "Officer":
         links += """
+            <a href="/dashboard">📊 Dashboard</a>
             <a href="/users">👥 Users</a>
-            <a href="/assignments">📌 Assign Inspection</a>
+            <a href="/assignments">🎲 Assign</a>
             <a href="/analytics">📈 Analytics</a>
             <a href="/cctv">📹 CCTV</a>
-            <a href="/meetings">🎥 Meetings</a>
         """
 
-    links += '<a href="/logout">🚪 Logout</a>'
+    # Worker and Inspector links
+    elif role in ["Worker", "Inspector"]:
+
+        links += """
+            <a href="/my-assignments">
+                📋 My Assignments
+            </a>
+
+            <a href="/dashboard">
+                📊 My Reports
+            </a>
+        """
+
+    links += """
+        <a href="/meetings">🎥 Meetings</a>
+        <a href="/logout">🚪 Logout</a>
+    """
 
     return f"""
     <div class="navbar">
-        <div>
-            <b>🏛️ Smart Monitoring & Inspection</b>
+
+        <div class="brand">
+            🏛️ <b>Smart Monitoring & Inspection System</b>
         </div>
-        <div>{links}</div>
+
+        <div class="nav-links">
+            {links}
+        </div>
+
     </div>
+
+    {notification_script()}
     """
 
 
@@ -479,15 +741,23 @@ def landing():
     {STYLE}
 
     <div class="navbar">
-        <b>🏛️ Smart Monitoring & Inspection System</b>
+
+        <div class="brand">
+            🏛️ <b>Smart Monitoring & Inspection System</b>
+        </div>
+
         <a href="/login">🔐 Login</a>
+
     </div>
+
 
     <div class="hero">
 
-        <h1>Smart Real-Time Monitoring & Inspection System</h1>
+        <h1>
+            Smart Real-Time Monitoring & Inspection System
+        </h1>
 
-        <p style="font-size:18px;">
+        <p>
             A digital platform for field inspection,
             evidence collection and real-time issue monitoring.
         </p>
@@ -498,6 +768,7 @@ def landing():
 
     </div>
 
+
     <div class="container">
 
         <div class="grid">
@@ -505,29 +776,32 @@ def landing():
             <div class="feature">
                 <h3>👷 Field Inspection</h3>
                 <p>
-                    Workers and Inspectors conduct inspections
-                    directly from assigned locations.
+                    Workers and Inspectors conduct
+                    inspections at assigned locations.
                 </p>
             </div>
 
             <div class="feature">
                 <h3>📸 Evidence Capture</h3>
                 <p>
-                    Upload photographic evidence with inspection reports.
+                    Upload photographic evidence
+                    with inspection reports.
                 </p>
             </div>
 
             <div class="feature">
                 <h3>📍 GPS Location</h3>
                 <p>
-                    Capture the location of field inspection reports.
+                    Capture field location details
+                    during inspections.
                 </p>
             </div>
 
             <div class="feature">
-                <h3>🤖 Smart Priority</h3>
+                <h3>🚨 Smart Priority</h3>
                 <p>
-                    Repeated problems automatically receive higher priority.
+                    Repeated problems automatically
+                    receive higher priority.
                 </p>
             </div>
 
@@ -551,21 +825,28 @@ def login():
 
     if request.method == "POST":
 
-        unique_id = request.form["unique_id"].strip().upper()
+        unique_id = request.form[
+            "unique_id"
+        ].strip().upper()
+
         password = request.form["password"]
 
         conn = get_connection()
 
-        user = conn.execute(
-            "SELECT * FROM users WHERE unique_id = ?",
-            (unique_id,)
-        ).fetchone()
+        user = conn.execute("""
+            SELECT *
+            FROM users
+            WHERE unique_id = ?
+        """, (unique_id,)).fetchone()
 
         conn.close()
 
-        if user and check_password_hash(
-            user["password"],
-            password
+        if (
+            user
+            and check_password_hash(
+                user["password"],
+                password
+            )
         ):
 
             session["user_id"] = user["id"]
@@ -582,7 +863,7 @@ def login():
     <div class="container">
 
         <div class="card"
-             style="max-width:500px; margin:60px auto;">
+             style="max-width:500px; margin:70px auto;">
 
             <h1 style="text-align:center;">
                 🔐 System Login
@@ -591,28 +872,30 @@ def login():
             <form method="POST">
 
                 <label>🆔 Unique ID</label>
-                <input type="text"
-                       name="unique_id"
-                       placeholder="Enter your ID"
-                       required>
+                <input
+                    type="text"
+                    name="unique_id"
+                    required
+                >
 
                 <label>🔑 Password</label>
-                <input type="password"
-                       name="password"
-                       placeholder="Enter your password"
-                       required>
+                <input
+                    type="password"
+                    name="password"
+                    required
+                >
 
-                <button class="btn"
-                        style="width:100%;"
-                        type="submit">
+                <button
+                    class="btn"
+                    style="width:100%;"
+                    type="submit"
+                >
                     Login
                 </button>
 
             </form>
 
             <p class="error">{error}</p>
-
-            <a href="/">← Back to Home</a>
 
         </div>
 
@@ -628,6 +911,7 @@ def login():
 def logout():
 
     session.clear()
+
     return redirect(url_for("landing"))
 
 
@@ -643,31 +927,58 @@ def home():
 
     role = session["role"]
 
-    buttons = ""
+    # --------------------------------------------------------
+    # AUTHORITY HOME
+    # --------------------------------------------------------
 
-    if role in ["Worker", "Inspector"]:
+    if role == "Authority":
 
-        buttons += """
-        <a class="btn btn-green"
-           href="/my-assignments">
-            📋 View My Assignments
-        </a>
+        buttons = """
+            <a class="btn" href="/dashboard">
+                📊 Monitoring Dashboard
+            </a>
+
+            <a class="btn btn-purple" href="/users">
+                👥 Manage Users
+            </a>
+
+            <a class="btn btn-orange" href="/assignments">
+                🎲 Assign Inspection
+            </a>
+
+            <a class="btn btn-green" href="/analytics">
+                📈 Analytics
+            </a>
         """
 
-    if role == "Officer":
+        work = """
+            👑 Manage the inspection system, monitor all
+            reports, assign field inspections and coordinate
+            the inspection team.
+        """
 
-        buttons += """
-        <a class="btn btn-purple" href="/users">
-            👥 Manage Users
-        </a>
+    # --------------------------------------------------------
+    # WORKER / INSPECTOR HOME
+    # --------------------------------------------------------
 
-        <a class="btn btn-orange" href="/assignments">
-            📌 Assign Inspection
-        </a>
+    else:
 
-        <a class="btn btn-green" href="/analytics">
-            📈 View Analytics
-        </a>
+        buttons = """
+            <a class="btn btn-green"
+               href="/my-assignments">
+                📋 My Assignments
+            </a>
+
+            <a class="btn btn-purple"
+               href="/meetings">
+                🎥 Team Meetings
+            </a>
+        """
+
+        work = """
+            👷 Complete your assigned inspections,
+            collect evidence and submit reports.
+            You can only access your own work.
         """
 
     return f"""
@@ -679,45 +990,40 @@ def home():
         <div class="card" style="text-align:center;">
 
             <h1>
-                Welcome, {session["name"]}! 👋
+                Welcome, {html.escape(session["name"])}! 👋
             </h1>
 
             <p>
-                Your Role:
+                Role:
                 <span class="badge">
                     {role}
                 </span>
             </p>
 
             <div class="info">
-                🔐 Features are available based on your authorized role.
+                {work}
             </div>
 
             {buttons}
 
-            <a class="btn" href="/dashboard">
-                📊 Dashboard
-            </a>
-
         </div>
+
 
         <div class="card">
 
-            <h2>🎯 System Workflow</h2>
+            <h2>🎯 Smart Inspection Workflow</h2>
 
             <p style="font-size:17px; line-height:2;">
 
-                👨‍💼 Officer Assigns
-                →
-                👷 Worker / 🔍 Inspector Conducts Inspection
-                →
-                📸 Evidence & GPS
-                →
-                📤 Report Submission
-                →
-                👨‍💼 Officer Verification
-                →
-                ✅ Issue Resolution
+                👑 Authority Assigns Inspection →
+                👷 Worker/Inspector Receives Assignment →
+                🔍 Field Inspection →
+                📸 Evidence Collection →
+                📤 Report Submission →
+                🤖 Smart Priority Detection →
+                📊 Authority Monitoring →
+                🎥 Team Coordination →
+                ✅ Resolution
 
             </p>
 
@@ -728,13 +1034,13 @@ def home():
 
 
 # ============================================================
-# USER MANAGEMENT - OFFICER
+# USER MANAGEMENT - AUTHORITY ONLY
 # ============================================================
 
 @app.route("/users", methods=["GET", "POST"])
 def users():
 
-    if not require_login() or session["role"] != "Officer":
+    if not role_required("Authority"):
         return "⛔ Access Denied.", 403
 
     message = ""
@@ -746,7 +1052,7 @@ def users():
         role = request.form["role"]
 
         prefixes = {
-            "Officer": "OFF",
+            "Authority": "AUTH",
             "Inspector": "INS",
             "Worker": "WORK"
         }
@@ -775,10 +1081,14 @@ def users():
 
         message = f"""
         <div class="info">
-            ✅ User Created Successfully!<br><br>
+
+            ✅ <b>User Created Successfully!</b>
+
+            <br><br>
             🆔 ID: <b>{unique_id}</b><br>
-            👤 Name: <b>{name}</b><br>
+            👤 Name: <b>{html.escape(name)}</b><br>
             🏷️ Role: <b>{role}</b>
+
         </div>
         """
 
@@ -799,7 +1109,7 @@ def users():
         rows += f"""
         <tr>
             <td>{user["unique_id"]}</td>
-            <td>{user["name"]}</td>
+            <td>{html.escape(user["name"])}</td>
             <td>{user["role"]}</td>
         </tr>
         """
@@ -822,24 +1132,28 @@ def users():
                 <input name="name" required>
 
                 <label>Password</label>
-                <input type="password"
-                       name="password"
-                       required>
+                <input
+                    type="password"
+                    name="password"
+                    required
+                >
 
                 <label>Role</label>
 
                 <select name="role">
+
                     <option value="Worker">
-                        👷 Worker
+                        Worker
                     </option>
 
                     <option value="Inspector">
-                        🔍 Inspector
+                        Inspector
                     </option>
 
-                    <option value="Officer">
-                        👨‍💼 Officer
+                    <option value="Authority">
+                        Authority
                     </option>
+
                 </select>
 
                 <button class="btn btn-purple">
@@ -850,6 +1164,7 @@ def users():
 
         </div>
 
+
         <div class="card">
 
             <h2>👥 Registered Users</h2>
@@ -857,12 +1172,15 @@ def users():
             <div style="overflow-x:auto;">
 
                 <table>
+
                     <tr>
                         <th>ID</th>
                         <th>Name</th>
                         <th>Role</th>
                     </tr>
+
                     {rows}
+
                 </table>
 
             </div>
@@ -874,18 +1192,18 @@ def users():
 
 
 # ============================================================
-# OFFICER - ASSIGN INSPECTION
+# RANDOM INSPECTION ASSIGNMENT - AUTHORITY ONLY
 # ============================================================
 
 @app.route("/assignments", methods=["GET", "POST"])
 def assignments():
 
-    if not require_login() or session["role"] != "Officer":
+    if not role_required("Authority"):
         return "⛔ Access Denied.", 403
 
     conn = get_connection()
 
-    workers = conn.execute("""
+    staff = conn.execute("""
         SELECT id, name, unique_id, role
         FROM users
         WHERE role IN ('Worker', 'Inspector')
@@ -895,34 +1213,30 @@ def assignments():
 
     if request.method == "POST":
 
-        location = request.form["location"].strip()
-        inspection_type = request.form["inspection_type"]
+        location = request.form[
+            "location"
+        ].strip()
 
-        assigned_user_id = request.form.get("user_id")
+        if not staff:
 
-        if assigned_user_id == "random":
-
-            selected = random.choice(workers)
+            message = """
+            <p class="error">
+                ❌ No Workers or Inspectors available.
+            </p>
+            """
 
         else:
 
-            selected = conn.execute("""
-                SELECT id, name, unique_id, role
-                FROM users
-                WHERE id = ?
-            """, (assigned_user_id,)).fetchone()
-
-        if selected:
+            # RANDOM STAFF SELECTION
+            selected = random.choice(staff)
 
             conn.execute("""
                 INSERT INTO assignments
-                (user_id, location, inspection_type,
-                 assigned_at, status)
-                VALUES (?, ?, ?, ?, ?)
+                (user_id, location, assigned_at, status)
+                VALUES (?, ?, ?, ?)
             """, (
                 selected["id"],
                 location,
-                inspection_type,
                 current_time(),
                 "Assigned"
             ))
@@ -932,41 +1246,38 @@ def assignments():
             message = f"""
             <div class="info">
 
-                ✅ <b>Inspection Assigned Successfully!</b>
+                🎲 <b>Inspection Randomly Assigned!</b>
+
                 <br><br>
 
-                📍 Location: <b>{location}</b><br>
-                🔍 Type: <b>{inspection_type}</b><br>
-                👤 Assigned To: <b>{selected["name"]}</b><br>
-                🏷️ Role: <b>{selected["role"]}</b>
+                📍 Location:
+                <b>{html.escape(location)}</b><br>
+
+                👤 Assigned To:
+                <b>{html.escape(selected["name"])}</b><br>
+
+                🏷️ Role:
+                <b>{selected["role"]}</b><br>
+
+                🆔 ID:
+                <b>{selected["unique_id"]}</b>
 
             </div>
             """
 
     assignment_list = conn.execute("""
-        SELECT assignments.*, users.name,
-               users.unique_id, users.role
+        SELECT
+            assignments.*,
+            users.name,
+            users.unique_id,
+            users.role
         FROM assignments
-        JOIN users ON assignments.user_id = users.id
+        JOIN users
+        ON assignments.user_id = users.id
         ORDER BY assignments.id DESC
     """).fetchall()
 
     conn.close()
-
-    user_options = """
-    <option value="random">
-        🎲 Random Assignment
-    </option>
-    """
-
-    for worker in workers:
-
-        user_options += f"""
-        <option value="{worker['id']}">
-            {worker['name']} -
-            {worker['role']}
-        </option>
-        """
 
     rows = ""
 
@@ -974,9 +1285,8 @@ def assignments():
 
         rows += f"""
         <tr>
-            <td>{item["location"]}</td>
-            <td>{item["inspection_type"]}</td>
-            <td>{item["name"]}</td>
+            <td>📍 {html.escape(item["location"])}</td>
+            <td>{html.escape(item["name"])}</td>
             <td>{item["role"]}</td>
             <td>{item["assigned_at"]}</td>
             <td>{item["status"]}</td>
@@ -991,66 +1301,54 @@ def assignments():
 
         <div class="card">
 
-            <h1>📌 Assign Field Inspection</h1>
+            <h1>🎲 Random Inspection Assignment</h1>
 
-            <p>
-                Assign routine inspections to Workers or
-                detailed inspections to Inspectors.
-            </p>
+            <div class="info">
+
+                The system randomly selects an available
+                Worker or Inspector for the inspection.
+
+            </div>
 
             {message}
 
             <form method="POST">
 
                 <label>📍 Location to Inspect</label>
-                <input name="location" required>
 
-                <label>🔍 Inspection Type</label>
-
-                <select name="inspection_type">
-                    <option value="Routine">
-                        Routine Inspection
-                    </option>
-
-                    <option value="Detailed">
-                        Detailed Inspection
-                    </option>
-
-                    <option value="Follow-up">
-                        Follow-up Inspection
-                    </option>
-                </select>
-
-                <label>👤 Assign To</label>
-
-                <select name="user_id">
-                    {user_options}
-                </select>
+                <input
+                    name="location"
+                    placeholder="Enter inspection location"
+                    required
+                >
 
                 <button class="btn btn-purple">
-                    📌 Assign Inspection
+                    🎲 Randomly Assign Inspection
                 </button>
 
             </form>
 
         </div>
 
+
         <div class="card">
 
-            <h2>📋 Assignment History</h2>
+            <h2>📋 All Assignment History</h2>
 
             <div style="overflow-x:auto;">
 
                 <table>
+
                     <tr>
                         <th>Location</th>
-                        <th>Type</th>
                         <th>Assigned To</th>
                         <th>Role</th>
-                        <th>Time</th>
+                        <th>Assigned Time</th>
                         <th>Status</th>
                     </tr>
+
                     {rows}
+
                 </table>
 
             </div>
@@ -1062,16 +1360,13 @@ def assignments():
 
 
 # ============================================================
-# WORKER / INSPECTOR - MY ASSIGNMENTS
+# MY ASSIGNMENTS - WORKER / INSPECTOR ONLY
 # ============================================================
 
 @app.route("/my-assignments")
 def my_assignments():
 
-    if not require_login():
-        return redirect(url_for("login"))
-
-    if session["role"] not in ["Worker", "Inspector"]:
+    if not role_required("Worker", "Inspector"):
         return "⛔ Access Denied.", 403
 
     conn = get_connection()
@@ -1081,7 +1376,9 @@ def my_assignments():
         FROM assignments
         WHERE user_id = ?
         ORDER BY id DESC
-    """, (session["user_id"],)).fetchall()
+    """, (
+        session["user_id"],
+    )).fetchall()
 
     conn.close()
 
@@ -1091,24 +1388,40 @@ def my_assignments():
 
         if assignment["status"] == "Completed":
 
-            action = "✅ Completed"
+            action = """
+                <span class="badge">
+                    ✅ Inspection Completed
+                </span>
+            """
 
         else:
 
             action = f"""
-            <a class="btn btn-green"
-               href="/inspection/{assignment['id']}">
-                🔍 Conduct Inspection
-            </a>
+                <a class="btn btn-green"
+                   href="/inspection/{assignment['id']}">
+                    🔍 Conduct Inspection
+                </a>
             """
 
         rows += f"""
         <tr>
-            <td>📍 {assignment["location"]}</td>
-            <td>{assignment["inspection_type"]}</td>
-            <td>{assignment["assigned_at"]}</td>
-            <td>{assignment["status"]}</td>
-            <td>{action}</td>
+
+            <td>
+                📍 {html.escape(assignment["location"])}
+            </td>
+
+            <td>
+                {assignment["assigned_at"]}
+            </td>
+
+            <td>
+                {assignment["status"]}
+            </td>
+
+            <td>
+                {action}
+            </td>
+
         </tr>
         """
 
@@ -1116,7 +1429,7 @@ def my_assignments():
 
         rows = """
         <tr>
-            <td colspan="5"
+            <td colspan="4"
                 style="text-align:center;">
                 📭 No assignments available.
             </td>
@@ -1134,8 +1447,10 @@ def my_assignments():
             <h1>📋 My Inspection Assignments</h1>
 
             <div class="info">
-                👷 Complete your assigned field inspection and
-                submit evidence directly through the system.
+
+                🔐 You can access only inspections
+                assigned specifically to you.
+
             </div>
 
             <div style="overflow-x:auto;">
@@ -1144,7 +1459,6 @@ def my_assignments():
 
                     <tr>
                         <th>Location</th>
-                        <th>Type</th>
                         <th>Assigned Time</th>
                         <th>Status</th>
                         <th>Action</th>
@@ -1163,21 +1477,22 @@ def my_assignments():
 
 
 # ============================================================
-# WORKER / INSPECTOR - CONDUCT INSPECTION
+# FIELD INSPECTION
 # ============================================================
 
-@app.route("/inspection/<int:assignment_id>",
-           methods=["GET", "POST"])
+@app.route(
+    "/inspection/<int:assignment_id>",
+    methods=["GET", "POST"]
+)
 def inspection(assignment_id):
 
-    if not require_login():
-        return redirect(url_for("login"))
-
-    if session["role"] not in ["Worker", "Inspector"]:
+    if not role_required("Worker", "Inspector"):
         return "⛔ Access Denied.", 403
 
     conn = get_connection()
 
+    # IMPORTANT:
+    # User can access only THEIR OWN assignment
     assignment = conn.execute("""
         SELECT *
         FROM assignments
@@ -1190,13 +1505,12 @@ def inspection(assignment_id):
     )).fetchone()
 
     if assignment is None:
-
         conn.close()
+        return "⛔ Inspection access denied.", 403
 
-        return """
-        ⛔ Inspection access denied.
-        A valid assigned inspection is required.
-        """, 403
+    # --------------------------------------------------------
+    # SUBMIT INSPECTION
+    # --------------------------------------------------------
 
     if request.method == "POST":
 
@@ -1206,12 +1520,22 @@ def inspection(assignment_id):
         safety = request.form["safety"]
         facilities = request.form["facilities"]
 
-        description = request.form["description"].strip()
+        description = request.form[
+            "description"
+        ].strip()
 
-        latitude = request.form.get("latitude", "")
-        longitude = request.form.get("longitude", "")
+        latitude = request.form.get(
+            "latitude", ""
+        )
 
+        longitude = request.form.get(
+            "longitude", ""
+        )
+
+        # ----------------------------------------------------
         # PHOTO UPLOAD
+        # ----------------------------------------------------
+
         photo_name = None
         photo = request.files.get("photo")
 
@@ -1238,7 +1562,10 @@ def inspection(assignment_id):
                 )
             )
 
+        # ----------------------------------------------------
         # DETECT ISSUES
+        # ----------------------------------------------------
+
         detected_issues = []
 
         if cleanliness == "No":
@@ -1250,14 +1577,20 @@ def inspection(assignment_id):
         if facilities == "No":
             detected_issues.append("Facilities")
 
-        # SAVE EACH ISSUE
+        # ----------------------------------------------------
+        # SAVE EACH DETECTED ISSUE
+        # ----------------------------------------------------
+
         for issue_type in detected_issues:
 
             previous_count = conn.execute("""
                 SELECT COUNT(*) AS count
                 FROM issues
-                WHERE LOWER(location) = LOWER(?)
-            """, (location,)).fetchone()["count"]
+                WHERE LOWER(location) =
+                      LOWER(?)
+            """, (
+                location,
+            )).fetchone()["count"]
 
             priority = calculate_priority(
                 previous_count + 1
@@ -1275,10 +1608,9 @@ def inspection(assignment_id):
                     photo,
                     reporter_id,
                     latitude,
-                    longitude,
-                    verified
+                    longitude
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 assignment_id,
                 location,
@@ -1290,70 +1622,22 @@ def inspection(assignment_id):
                 photo_name,
                 session["user_id"],
                 latitude,
-                longitude,
-                0
+                longitude
             ))
 
-        # COMPLETE ASSIGNMENT
+        # Mark assignment completed
         conn.execute("""
             UPDATE assignments
             SET status = 'Completed'
             WHERE id = ?
-        """, (assignment_id,))
+        """, (
+            assignment_id,
+        ))
 
         conn.commit()
         conn.close()
 
-        if detected_issues:
-
-            result = (
-                "⚠️ Issues Reported: "
-                + ", ".join(detected_issues)
-            )
-
-        else:
-
-            result = """
-            ✅ Inspection completed successfully.
-            No issues found!
-            """
-
-        return f"""
-        {STYLE}
-        {navbar()}
-
-        <div class="container">
-
-            <div class="card"
-                 style="text-align:center;">
-
-                <h1>✅ Inspection Submitted!</h1>
-
-                <div class="info">
-
-                    📍 Location:
-                    <b>{location}</b>
-
-                    <br><br>
-
-                    {result}
-
-                </div>
-
-                <a class="btn"
-                   href="/my-assignments">
-                    📋 My Assignments
-                </a>
-
-                <a class="btn btn-green"
-                   href="/dashboard">
-                    📊 Dashboard
-                </a>
-
-            </div>
-
-        </div>
-        """
+        return redirect(url_for("dashboard"))
 
     conn.close()
 
@@ -1365,106 +1649,133 @@ def inspection(assignment_id):
 
         <div class="card">
 
-            <h1>🔍 Conduct Field Inspection</h1>
+            <h1>🔍 Field Inspection</h1>
 
             <div class="info">
 
                 📍 Assigned Location:
-                <b>{assignment["location"]}</b>
+                <b>
+                    {html.escape(assignment["location"])}
+                </b>
+
                 <br><br>
 
-                🔍 Inspection Type:
-                <b>{assignment["inspection_type"]}</b>
-                <br><br>
-
-                👤 Conducted By:
-                <b>{session["name"]}</b>
+                👤 Inspector/Worker:
+                <b>
+                    {html.escape(session["name"])}
+                </b>
 
             </div>
 
-            <form method="POST"
-                  enctype="multipart/form-data">
+            <form
+                method="POST"
+                enctype="multipart/form-data"
+            >
 
                 <label>
                     🧹 Is the area clean?
                 </label>
 
                 <select name="cleanliness">
+
                     <option value="Yes">
                         Yes ✅
                     </option>
+
                     <option value="No">
                         No ❌ - Issue Found
                     </option>
+
                 </select>
+
 
                 <label>
                     🛡️ Is the area safe?
                 </label>
 
                 <select name="safety">
+
                     <option value="Yes">
                         Yes ✅
                     </option>
+
                     <option value="No">
                         No ❌ - Issue Found
                     </option>
+
                 </select>
+
 
                 <label>
                     🏢 Are facilities working properly?
                 </label>
 
                 <select name="facilities">
+
                     <option value="Yes">
                         Yes ✅
                     </option>
+
                     <option value="No">
                         No ❌ - Issue Found
                     </option>
+
                 </select>
+
 
                 <label>
                     📸 Upload Photo Evidence
                 </label>
 
-                <input type="file"
-                       name="photo"
-                       accept="image/*">
+                <input
+                    type="file"
+                    name="photo"
+                    accept="image/*"
+                >
+
 
                 <label>
                     📍 GPS Coordinates
                 </label>
 
-                <input id="latitude"
-                       name="latitude"
-                       placeholder="Latitude">
+                <input
+                    id="latitude"
+                    name="latitude"
+                    placeholder="Latitude"
+                    readonly
+                >
 
-                <input id="longitude"
-                       name="longitude"
-                       placeholder="Longitude">
+                <input
+                    id="longitude"
+                    name="longitude"
+                    placeholder="Longitude"
+                    readonly
+                >
 
-                <button type="button"
-                        class="btn btn-purple"
-                        onclick="getLocation()">
-
-                    📍 Get My Current Location
-
+                <button
+                    type="button"
+                    class="btn btn-purple"
+                    onclick="getLocation()"
+                >
+                    📍 Capture My Location
                 </button>
 
+
                 <label>
-                    📝 Observation / Description
+                    📝 Inspection Description
                 </label>
 
-                <textarea name="description"
-                    placeholder="Describe issues or observations...">
-                </textarea>
+                <textarea
+                    name="description"
+                    placeholder="Describe any issues found..."
+                ></textarea>
 
-                <button class="btn"
-                        type="submit">
 
+                <button
+                    class="btn btn-green"
+                    type="submit"
+                >
                     📤 Submit Inspection Report
-
                 </button>
 
             </form>
@@ -1473,49 +1784,55 @@ def inspection(assignment_id):
 
     </div>
 
+
     <script>
 
-    function getLocation() {{
+    function getLocation() {
 
-        if (navigator.geolocation) {{
+        if (navigator.geolocation) {
 
             navigator.geolocation.getCurrentPosition(
 
-                function(position) {{
+                function(position) {
 
-                    document.getElementById("latitude").value =
+                    document.getElementById(
+                        "latitude"
+                    ).value =
                         position.coords.latitude;
 
-                    document.getElementById("longitude").value =
+                    document.getElementById(
+                        "longitude"
+                    ).value =
                         position.coords.longitude;
 
-                }},
+                    alert(
+                        "📍 Location captured successfully!"
+                    );
+                },
 
-                function() {{
+                function() {
 
                     alert(
-                        "Unable to get location. "
-                        + "Please allow location permission."
+                        "❌ Please allow location permission."
                     );
-
-                }}
+                }
             );
+        }
 
-        }} else {{
+        else {
 
             alert(
-                "Geolocation is not supported "
-                + "by this browser."
+                "Geolocation is not supported."
             );
-        }}
-    }}
+        }
+    }
 
     </script>
     """
 
 
 # ============================================================
-# SERVE UPLOADED PHOTOS
+# SERVE UPLOADED EVIDENCE
 # ============================================================
 
 @app.route("/uploads/<filename>")
@@ -1539,24 +1856,34 @@ def dashboard():
 
     conn = get_connection()
 
-    # OFFICER CAN SEE ALL REPORTS
-    if session["role"] == "Officer":
+    role = session["role"]
+
+    # --------------------------------------------------------
+    # AUTHORITY SEES ALL REPORTS
+    # --------------------------------------------------------
+
+    if role == "Authority":
 
         issues = conn.execute("""
-            SELECT issues.*,
-                   users.name AS reporter_name
+            SELECT
+                issues.*,
+                users.name AS reporter_name
             FROM issues
             LEFT JOIN users
             ON issues.reporter_id = users.id
             ORDER BY issues.id DESC
         """).fetchall()
 
-    # WORKER / INSPECTOR SEE OWN REPORTS
+    # --------------------------------------------------------
+    # WORKER / INSPECTOR SEES ONLY OWN REPORTS
+    # --------------------------------------------------------
+
     else:
 
         issues = conn.execute("""
-            SELECT issues.*,
-                   users.name AS reporter_name
+            SELECT
+                issues.*,
+                users.name AS reporter_name
             FROM issues
             LEFT JOIN users
             ON issues.reporter_id = users.id
@@ -1585,10 +1912,32 @@ def dashboard():
         if issue["status"] == "Resolved"
     )
 
-    high = sum(
-        1 for issue in issues
+    high_issues = [
+        issue for issue in issues
         if issue["priority"] == "High"
-    )
+    ]
+
+    # --------------------------------------------------------
+    # HIGH PRIORITY ALERT - AUTHORITY
+    # --------------------------------------------------------
+
+    high_alert = ""
+
+    if role == "Authority" and high_issues:
+
+        high_alert = f"""
+        <div class="high-alert">
+
+            <h2>🚨 High Priority Alert!</h2>
+
+            <p>
+                <b>{len(high_issues)}</b>
+                high priority issue(s) require
+                immediate attention.
+            </p>
+
+        </div>
+        """
 
     rows = ""
 
@@ -1598,107 +1947,83 @@ def dashboard():
 
         if issue["photo"]:
 
-            filename = issue["photo"]
-
             photo_html = f"""
-            <a href="/uploads/{filename}"
-               target="_blank">
-
-                <img class="evidence-photo"
-                     src="/uploads/{filename}"
-                     alt="Evidence">
-
-            </a>
+            <img
+                class="evidence-photo"
+                src="/uploads/{issue['photo']}"
+                alt="Evidence"
+            >
             """
 
-        location_html = f"""
-        📍 {issue["location"]}
-        """
+        reporter = ""
 
-        if issue["latitude"] and issue["longitude"]:
+        if role == "Authority":
 
-            location_html += f"""
-            <br>
-            <small>
-                {issue["latitude"]},
-                {issue["longitude"]}
-            </small>
+            reporter = f"""
+                <td>
+                    {html.escape(issue["reporter_name"] or "Unknown")}
+                </td>
             """
-
-        if session["role"] == "Officer":
-
-            # VERIFY ACTION
-            if issue["verified"] == 0:
-
-                verify_action = f"""
-                <a class="btn btn-purple"
-                   href="/verify/{issue['id']}">
-                    🔍 Verify
-                </a>
-                """
-
-            else:
-
-                verify_action = "✅ Verified"
-
-            # STATUS ACTION
-            if issue["status"] == "Reported":
-
-                status_action = f"""
-                <a class="btn btn-orange"
-                   href="/update/{issue['id']}/In%20Progress">
-                    🟡 Start
-                </a>
-                """
-
-            elif issue["status"] == "In Progress":
-
-                status_action = f"""
-                <a class="btn btn-green"
-                   href="/update/{issue['id']}/Resolved">
-                    ✅ Resolve
-                </a>
-                """
-
-            else:
-
-                status_action = "✅ Resolved"
-
-            action = (
-                verify_action
-                + "<br>"
-                + status_action
-            )
-
-        else:
-
-            action = "🔒 View Only"
 
         rows += f"""
         <tr>
 
-            <td>{location_html}</td>
-            <td>{issue["issue_type"]}</td>
-            <td>{issue["description"] or "-"}</td>
-            <td>{priority_badge(issue["priority"])}</td>
-            <td>{photo_html}</td>
-            <td>{issue["status"]}</td>
-            <td>{issue["created_at"]}</td>
-            <td>{action}</td>
+            <td>
+                📍 {html.escape(issue["location"])}
+            </td>
+
+            <td>
+                {html.escape(issue["issue_type"])}
+            </td>
+
+            <td>
+                {html.escape(issue["description"] or "-")}
+            </td>
+
+            <td>
+                {priority_badge(issue["priority"])}
+            </td>
+
+            <td>
+                {photo_html}
+            </td>
+
+            <td>
+                {issue["status"]}
+            </td>
+
+            {reporter}
 
         </tr>
         """
 
     if not rows:
 
-        rows = """
+        colspan = 7 if role == "Authority" else 6
+
+        rows = f"""
         <tr>
-            <td colspan="8"
-                style="text-align:center;">
+
+            <td
+                colspan="{colspan}"
+                style="text-align:center;"
+            >
                 🎉 No inspection issues found.
             </td>
+
         </tr>
         """
+
+    reporter_heading = ""
+
+    if role == "Authority":
+        reporter_heading = "<th>Reported By</th>"
+
+    title = (
+        "📊 Real-Time Monitoring Dashboard"
+        if role == "Authority"
+        else "📊 My Inspection Reports"
+    )
 
     return f"""
     {STYLE}
@@ -1706,7 +2031,9 @@ def dashboard():
 
     <div class="container">
 
-        <h1>📊 Real-Time Monitoring Dashboard</h1>
+        <h1>{title}</h1>
+
+        {high_alert}
 
         <div class="dashboard-grid">
 
@@ -1730,12 +2057,8 @@ def dashboard():
                 <p>🟢 Resolved</p>
             </div>
 
-            <div class="stat-card">
-                <div class="stat-number">{high}</div>
-                <p>🔴 High Priority</p>
-            </div>
-
         </div>
+
 
         <div class="card">
 
@@ -1752,8 +2075,7 @@ def dashboard():
                         <th>Priority</th>
                         <th>Evidence</th>
                         <th>Status</th>
-                        <th>Time</th>
-                        <th>Action</th>
+                        {reporter_heading}
                     </tr>
 
                     {rows}
@@ -1769,111 +2091,29 @@ def dashboard():
 
 
 # ============================================================
-# OFFICER - VERIFY ISSUE
-# ============================================================
-
-@app.route("/verify/<int:issue_id>")
-def verify_issue(issue_id):
-
-    if (
-        not require_login()
-        or session["role"] != "Officer"
-    ):
-        return "⛔ Access Denied.", 403
-
-    conn = get_connection()
-
-    conn.execute("""
-        UPDATE issues
-        SET verified = 1
-        WHERE id = ?
-    """, (issue_id,))
-
-    conn.commit()
-    conn.close()
-
-    return redirect(url_for("dashboard"))
-
-
-# ============================================================
-# OFFICER - UPDATE ISSUE STATUS
-# ============================================================
-
-@app.route("/update/<int:issue_id>/<status>")
-def update_status(issue_id, status):
-
-    if (
-        not require_login()
-        or session["role"] != "Officer"
-    ):
-        return "⛔ Access Denied.", 403
-
-    allowed_statuses = [
-        "Reported",
-        "In Progress",
-        "Resolved"
-    ]
-
-    if status not in allowed_statuses:
-        return "❌ Invalid Status."
-
-    conn = get_connection()
-
-    conn.execute("""
-        UPDATE issues
-        SET status = ?
-        WHERE id = ?
-    """, (
-        status,
-        issue_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return redirect(url_for("dashboard"))
-
-
-# ============================================================
-# ANALYTICS - OFFICER
+# ANALYTICS - AUTHORITY ONLY
 # ============================================================
 
 @app.route("/analytics")
 def analytics():
 
-    if (
-        not require_login()
-        or session["role"] != "Officer"
-    ):
+    if not role_required("Authority"):
         return "⛔ Access Denied.", 403
 
     conn = get_connection()
 
     locations = conn.execute("""
-        SELECT location,
-               COUNT(*) AS reports
+        SELECT
+            location,
+            COUNT(*) AS reports
         FROM issues
         GROUP BY location
         ORDER BY reports DESC
     """).fetchall()
 
-    inspectors = conn.execute("""
-        SELECT
-            users.name,
-            users.unique_id,
-            users.role,
-            COUNT(assignments.id) AS inspections
-        FROM users
-        LEFT JOIN assignments
-        ON users.id = assignments.user_id
-        WHERE users.role IN ('Worker', 'Inspector')
-        GROUP BY users.id
-        ORDER BY inspections DESC
-    """).fetchall()
-
     conn.close()
 
-    location_rows = ""
+    rows = ""
 
     for item in locations:
 
@@ -1881,44 +2121,21 @@ def analytics():
             item["reports"]
         )
 
-        location_rows += f"""
+        rows += f"""
         <tr>
-            <td>{item["location"]}</td>
-            <td>{item["reports"]}</td>
-            <td>{priority_badge(priority)}</td>
-        </tr>
-        """
 
-    worker_rows = ""
-
-    for worker in inspectors:
-
-        worker_rows += f"""
-        <tr>
-            <td>{worker["name"]}</td>
-            <td>{worker["unique_id"]}</td>
-            <td>{worker["role"]}</td>
-            <td>{worker["inspections"]}</td>
-        </tr>
-        """
-
-    if not location_rows:
-
-        location_rows = """
-        <tr>
-            <td colspan="3">
-                No data available.
+            <td>
+                📍 {html.escape(item["location"])}
             </td>
-        </tr>
-        """
 
-    if not worker_rows:
-
-        worker_rows = """
-        <tr>
-            <td colspan="4">
-                No inspection activity available.
+            <td>
+                {item["reports"]}
             </td>
+
+            <td>
+                {priority_badge(priority)}
+            </td>
+
         </tr>
         """
 
@@ -1934,41 +2151,27 @@ def analytics():
 
             <div class="info">
 
-                🤖 Locations with repeated problems
-                automatically receive increased priority.
+                Priority is automatically calculated
+                based on repeated reports at the same
+                location.
+
+                <br><br>
+
+                🟢 1 Report = Low |
+                🟡 2–3 Reports = Medium |
+                🔴 More than 3 = High
 
             </div>
-
-            <h2>🚨 Repeat Problem Locations</h2>
 
             <table>
 
                 <tr>
                     <th>Location</th>
-                    <th>Reports</th>
+                    <th>Total Reports</th>
                     <th>Priority</th>
                 </tr>
 
-                {location_rows}
-
-            </table>
-
-        </div>
-
-        <div class="card">
-
-            <h2>👷 Inspection Activity</h2>
-
-            <table>
-
-                <tr>
-                    <th>Name</th>
-                    <th>ID</th>
-                    <th>Role</th>
-                    <th>Assigned Inspections</th>
-                </tr>
-
-                {worker_rows}
+                {rows}
 
             </table>
 
@@ -1979,24 +2182,26 @@ def analytics():
 
 
 # ============================================================
-# CCTV MONITORING - OFFICER
+# CCTV - AUTHORITY ONLY
 # ============================================================
 
 @app.route("/cctv", methods=["GET", "POST"])
 def cctv():
 
-    if (
-        not require_login()
-        or session["role"] != "Officer"
-    ):
+    if not role_required("Authority"):
         return "⛔ Access Denied.", 403
 
     conn = get_connection()
 
     if request.method == "POST":
 
-        location = request.form["location"].strip()
-        feed_url = request.form["feed_url"].strip()
+        location = request.form[
+            "location"
+        ].strip()
+
+        feed_url = request.form[
+            "feed_url"
+        ].strip()
 
         conn.execute("""
             INSERT INTO cctv_feeds
@@ -2024,24 +2229,23 @@ def cctv():
 
         rows += f"""
         <tr>
-            <td>{feed["location"]}</td>
+
             <td>
-                <a class="btn"
-                   href="{feed["feed_url"]}"
-                   target="_blank">
+                {html.escape(feed["location"])}
+            </td>
+
+            <td>
+
+                <a
+                    class="btn"
+                    href="{html.escape(feed["feed_url"])}"
+                    target="_blank"
+                >
                     📹 Open Feed
                 </a>
-            </td>
-        </tr>
-        """
 
-    if not rows:
-
-        rows = """
-        <tr>
-            <td colspan="2">
-                No feeds added yet.
             </td>
+
         </tr>
         """
 
@@ -2057,23 +2261,37 @@ def cctv():
 
             <form method="POST">
 
-                <label>Camera Location</label>
-                <input name="location" required>
+                <label>
+                    Camera Location
+                </label>
 
-                <label>Authorized Monitoring URL</label>
-                <input type="url"
-                       name="feed_url"
-                       required>
+                <input
+                    name="location"
+                    required
+                >
+
+                <label>
+                    Authorized Monitoring URL
+                </label>
+
+                <input
+                    type="url"
+                    name="feed_url"
+                    required
+                >
 
                 <button class="btn">
-                    ➕ Add Feed
+                    ➕ Add CCTV Feed
                 </button>
 
             </form>
 
         </div>
 
+
         <div class="card">
+
+            <h2>📹 Registered CCTV Feeds</h2>
 
             <table>
 
@@ -2093,41 +2311,170 @@ def cctv():
 
 
 # ============================================================
-# VIDEO MEETINGS - OFFICER
+# 🔔 LATEST MEETING API
+# ============================================================
+
+@app.route("/api/latest-meeting")
+def latest_meeting_notification():
+
+    if not require_login():
+
+        return jsonify({
+            "logged_in": False
+        }), 401
+
+    if session["role"] not in [
+        "Worker",
+        "Inspector"
+    ]:
+
+        return jsonify({
+            "meeting": None
+        })
+
+    conn = get_connection()
+
+    meeting = conn.execute("""
+        SELECT
+            meetings.id,
+            meetings.title,
+            meetings.created_at,
+            meetings.meeting_url,
+            users.name AS authority_name
+
+        FROM meetings
+
+        LEFT JOIN users
+        ON meetings.created_by = users.id
+
+        ORDER BY meetings.id DESC
+        LIMIT 1
+
+    """).fetchone()
+
+    conn.close()
+
+    if meeting is None:
+
+        return jsonify({
+            "meeting": None
+        })
+
+    return jsonify({
+        "meeting": {
+
+            "id": meeting["id"],
+            "title": meeting["title"],
+            "created_at": meeting["created_at"],
+            "meeting_url": meeting["meeting_url"],
+
+            "authority_name":
+                meeting["authority_name"]
+                or "Authority"
+        }
+    })
+
+
+# ============================================================
+# MEETINGS
 # ============================================================
 
 @app.route("/meetings", methods=["GET", "POST"])
 def meetings():
 
-    if (
-        not require_login()
-        or session["role"] != "Officer"
-    ):
-        return "⛔ Access Denied.", 403
+    if not require_login():
+        return redirect(url_for("login"))
 
     conn = get_connection()
+    message = ""
+
+    # --------------------------------------------------------
+    # AUTHORITY CREATES MEETING
+    # --------------------------------------------------------
 
     if request.method == "POST":
 
+        if session["role"] != "Authority":
+
+            conn.close()
+
+            return (
+                "⛔ Only Authority can create meetings.",
+                403
+            )
+
         title = request.form["title"].strip()
-        meeting_url = request.form["meeting_url"].strip()
+
+        # RANDOM UNIQUE MEETING CODE
+        meeting_code = uuid.uuid4().hex[:16].upper()
+
+        # RANDOM UNIQUE INTERNAL LINK
+        meeting_url = url_for(
+            "meeting_room",
+            meeting_code=meeting_code,
+            _external=True
+        )
 
         conn.execute("""
             INSERT INTO meetings
-            (title, meeting_url, created_at)
-            VALUES (?, ?, ?)
+            (
+                title,
+                meeting_url,
+                created_at,
+                created_by,
+                meeting_code
+            )
+            VALUES (?, ?, ?, ?, ?)
         """, (
             title,
             meeting_url,
-            current_time()
+            current_time(),
+            session["user_id"],
+            meeting_code
         ))
 
         conn.commit()
 
+        message = f"""
+        <div class="info">
+
+            🎉 <b>Meeting Created Successfully!</b>
+
+            <br><br>
+
+            🔔 Workers and Inspectors who are currently
+            using the system will receive a popup
+            notification automatically.
+
+            <br><br>
+
+            🎥 Meeting:
+            <b>{html.escape(title)}</b>
+
+            <br><br>
+
+            🔗 A unique random meeting link has
+            been generated successfully.
+
+        </div>
+        """
+
+    # --------------------------------------------------------
+    # GET ALL MEETINGS
+    # --------------------------------------------------------
+
     meeting_list = conn.execute("""
-        SELECT *
+        SELECT
+            meetings.*,
+            users.name AS authority_name
+
         FROM meetings
-        ORDER BY id DESC
+
+        LEFT JOIN users
+        ON meetings.created_by = users.id
+
+        ORDER BY meetings.id DESC
+
     """).fetchall()
 
     conn.close()
@@ -2136,17 +2483,37 @@ def meetings():
 
     for meeting in meeting_list:
 
+        authority_name = (
+            meeting["authority_name"]
+            or "System Authority"
+        )
+
         rows += f"""
         <tr>
-            <td>{meeting["title"]}</td>
-            <td>{meeting["created_at"]}</td>
+
             <td>
-                <a class="btn btn-purple"
-                   href="{meeting["meeting_url"]}"
-                   target="_blank">
+                {html.escape(meeting["title"])}
+            </td>
+
+            <td>
+                {html.escape(authority_name)}
+            </td>
+
+            <td>
+                {meeting["created_at"]}
+            </td>
+
+            <td>
+
+                <a
+                    class="btn btn-purple"
+                    href="{meeting["meeting_url"]}"
+                >
                     🎥 Join Meeting
                 </a>
+
             </td>
+
         </tr>
         """
 
@@ -2154,9 +2521,233 @@ def meetings():
 
         rows = """
         <tr>
-            <td colspan="3">
-                No meetings available.
+            <td
+                colspan="4"
+                style="text-align:center;"
+            >
+                📭 No meetings available.
             </td>
+        </tr>
+        """
+
+    # --------------------------------------------------------
+    # AUTHORITY CREATE FORM
+    # --------------------------------------------------------
+
+    create_form = ""
+
+    if session["role"] == "Authority":
+
+        create_form = """
+        <div class="card">
+
+            <h1>🎥 Create Team Meeting</h1>
+
+            <div class="info">
+
+                🔗 A new random unique meeting link
+                will be automatically generated.
+
+                <br><br>
+
+                🔔 Workers and Inspectors currently
+                logged into the website will receive
+                a popup notification.
+
+            </div>
+
+            <form method="POST">
+
+                <label>
+                    📝 Meeting Title
+                </label>
+
+                <input
+                    name="title"
+                    placeholder="Example: Emergency Inspection Review"
+                    required
+                >
+
+                <button
+                    class="btn btn-purple"
+                    type="submit"
+                >
+                    🔔 Create Meeting & Notify Team
+                </button>
+
+            </form>
+
+        </div>
+        """
+
+    # --------------------------------------------------------
+    # LATEST MEETING CARD FOR STAFF
+    # --------------------------------------------------------
+
+    notification = ""
+
+    if (
+        session["role"] in ["Worker", "Inspector"]
+        and meeting_list
+    ):
+
+        latest = meeting_list[0]
+
+        notification = f"""
+        <div class="notification">
+
+            <h2>🔔 Latest Team Meeting</h2>
+
+            <p>
+
+                🎥
+                <b>
+                    {html.escape(latest["title"])}
+                </b>
+
+                <br><br>
+
+                A meeting has been created by the
+                Authority. Please attend if required.
+
+            </p>
+
+            <a
+                class="btn btn-purple"
+                href="{latest["meeting_url"]}"
+            >
+                🎥 Attend Meeting
+            </a>
+
+        </div>
+        """
+
+    return f"""
+    {STYLE}
+    {navbar()}
+
+    <div class="container">
+
+        {message}
+
+        {notification}
+
+        {create_form}
+
+        <div class="card">
+
+            <h2>🎥 Available Meetings</h2>
+
+            <div style="overflow-x:auto;">
+
+                <table>
+
+                    <tr>
+                        <th>Meeting</th>
+                        <th>Created By</th>
+                        <th>Created Time</th>
+                        <th>Join</th>
+                    </tr>
+
+                    {rows}
+
+                </table>
+
+            </div>
+
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# MEETING ROOM
+# ============================================================
+
+@app.route("/meeting/<meeting_code>")
+def meeting_room(meeting_code):
+
+    if not require_login():
+        return redirect(url_for("login"))
+
+    conn = get_connection()
+
+    meeting = conn.execute("""
+        SELECT
+            meetings.*,
+            users.name AS authority_name
+
+        FROM meetings
+
+        LEFT JOIN users
+        ON meetings.created_by = users.id
+
+        WHERE meetings.meeting_code = ?
+
+    """, (
+        meeting_code,
+    )).fetchone()
+
+    if meeting is None:
+
+        conn.close()
+
+        return "❌ Meeting not found.", 404
+
+    # Record participant
+    conn.execute("""
+        INSERT OR IGNORE INTO meeting_participants
+        (meeting_id, user_id, joined_at)
+        VALUES (?, ?, ?)
+    """, (
+        meeting["id"],
+        session["user_id"],
+        current_time()
+    ))
+
+    conn.commit()
+
+    participants = conn.execute("""
+        SELECT
+            users.name,
+            users.role,
+            meeting_participants.joined_at
+
+        FROM meeting_participants
+
+        JOIN users
+        ON meeting_participants.user_id = users.id
+
+        WHERE meeting_participants.meeting_id = ?
+
+        ORDER BY meeting_participants.joined_at ASC
+
+    """, (
+        meeting["id"],
+    )).fetchall()
+
+    conn.close()
+
+    participant_rows = ""
+
+    for participant in participants:
+
+        participant_rows += f"""
+        <tr>
+
+            <td>
+                👤 {html.escape(participant["name"])}
+            </td>
+
+            <td>
+                {participant["role"]}
+            </td>
+
+            <td>
+                🟢 Joined
+            </td>
+
         </tr>
         """
 
@@ -2166,41 +2757,71 @@ def meetings():
 
     <div class="container">
 
-        <div class="card">
+        <div
+            class="card"
+            style="text-align:center;"
+        >
 
-            <h1>🎥 Video Conference Coordination</h1>
+            <h1>
+                🎥 Smart Inspection Meeting Room
+            </h1>
 
-            <form method="POST">
+            <div class="info">
 
-                <label>Meeting Title</label>
-                <input name="title" required>
+                🟢
+                <b>You have successfully joined!</b>
 
-                <label>Meeting URL</label>
-                <input type="url"
-                       name="meeting_url"
-                       required>
+                <br><br>
 
-                <button class="btn btn-purple">
-                    ➕ Add Meeting
-                </button>
+                🎥 Meeting:
+                <b>
+                    {html.escape(meeting["title"])}
+                </b>
 
-            </form>
+                <br><br>
+
+                👤 Joined as:
+                <b>
+                    {html.escape(session["name"])}
+                </b>
+
+                ({session["role"]})
+
+            </div>
+
+            <p>
+
+                🤝 This meeting module helps the
+                inspection team coordinate and keeps
+                track of participants.
+
+            </p>
+
+            <a
+                class="btn"
+                href="/meetings"
+            >
+                ← Back to Meetings
+            </a>
 
         </div>
 
+
         <div class="card">
 
-            <h2>🎥 Available Meetings</h2>
+            <h2>
+                👥 Meeting Participants
+            </h2>
 
             <table>
 
                 <tr>
-                    <th>Meeting</th>
-                    <th>Created</th>
-                    <th>Join</th>
+                    <th>Name</th>
+                    <th>Role</th>
+                    <th>Status</th>
                 </tr>
 
-                {rows}
+                {participant_rows}
 
             </table>
 
@@ -2217,7 +2838,9 @@ def meetings():
 if __name__ == "__main__":
 
     print("=" * 60)
-    print(" Smart Monitoring & Inspection System Starting...")
+    print(
+        " Smart Monitoring & Inspection System is Starting..."
+    )
     print(" Open: http://127.0.0.1:5000")
     print("=" * 60)
 
