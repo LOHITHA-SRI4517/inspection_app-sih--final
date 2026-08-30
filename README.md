@@ -1,157 +1,76 @@
-🏛️ SIMMS – Smart Inspection & Monitoring Management System
-📌 About the Project
+# SIMMS - Smart Inspection & Monitoring Management System
 
-SIMMS (Smart Inspection & Monitoring Management System) is a web-based application designed to digitize and simplify the inspection and monitoring process.
+## About
 
-The system provides a centralized platform where an Authority can manage users, assign inspections, monitor reported issues, analyze repeated problems, and coordinate with the inspection team. Workers and Inspectors can receive assignments, complete verification, conduct inspections, upload evidence, and report issues.
+SIMMS is a web-based application designed to manage and monitor inspection activities digitally. It helps authorities, inspectors, and workers coordinate inspections, report issues, track their status, and manage the complete inspection process in one system.
 
-🎯 Problem Statement
+## Features
 
-Traditional inspection processes can involve manual reporting, delayed communication, and difficulty tracking repeated issues.
+- Role-based login for Authority, Inspector, and Worker
+- User management
+- Automated inspection assignment
+- Face verification before starting an inspection
+- Field inspection and issue reporting
+- Photo evidence upload
+- GPS location capture
+- Issue priority detection based on repeated reports
+- Monitoring dashboard
+- Issue verification and status updates
+- Inspection analytics
+- CCTV monitoring link management
+- Team meeting coordination
 
-SIMMS helps solve these problems by providing a digital platform for:
+## How It Works
 
-📋 Inspection assignment and tracking
-👥 Role-based user management
-📷 Verification before inspections
-📸 Evidence-based issue reporting
-📊 Real-time monitoring dashboard
-🤖 Smart priority detection
-📈 Inspection analytics
-🎥 Team meeting coordination
-✨ Key Features
-👩‍💼 Authority Module
-Create and manage system users
-Assign inspections to Workers or Inspectors
-Monitor all reported issues
-Verify inspection reports
-Update issue status
-View inspection analytics
-Add and manage CCTV monitoring links
-Create team meetings
-👷 Worker & Inspector Module
-Secure login using Unique ID and password
-View assigned inspections
-Complete face verification before inspection
-Conduct field inspections
-Report cleanliness, safety, and facility issues
-Upload photo evidence
-Add GPS location details
-Track submitted reports
-View and join team meetings
-📊 Smart Monitoring Dashboard
+1. The Authority assigns an inspection to a Worker or Inspector.
+2. The assigned user completes face verification.
+3. The Worker or Inspector performs the inspection and submits a report.
+4. Issues can include descriptions, photo evidence, and location details.
+5. The system automatically assigns priority based on repeated issues at the same location.
+6. The Authority monitors, verifies, and updates the issue status through the dashboard.
 
-The dashboard provides information about:
+## Technologies Used
 
-Total Issues
-Reported Issues
-Issues In Progress
-Resolved Issues
-High-Priority Issues
-🤖 Smart Priority Detection
+- Python
+- Flask
+- SQLite
+- HTML
+- CSS
+- JavaScript
+- Werkzeug
 
-When multiple issues are reported from the same location, the system automatically increases the priority:
+pip install -r requirements.txt
 
-🟢 Low Priority
-🟡 Medium Priority
-🔴 High Priority
-🎥 Meeting Coordination
+Install the required packages:
 
-Authorities can create team meetings with automatically generated meeting links. Workers and Inspectors can view available meeting information and join the meeting room.
+pip install -r requirements.txt
 
-🔄 System Workflow
-Authority
-    ↓
-Inspection Assignment
-    ↓
-Worker / Inspector
-    ↓
-Face Verification
-    ↓
-Field Inspection
-    ↓
-Evidence & Issue Reporting
-    ↓
-Smart Priority Analysis
-    ↓
-Authority Dashboard Monitoring
-    ↓
-Verification & Resolution
-🛠️ Technologies Used
-Technology	Purpose
-🐍 Python	Backend Development
-🌶️ Flask	Web Framework
-🗄️ SQLite	Database Management
-🌐 HTML	Web Page Structure
-🎨 CSS	User Interface Design
-⚙️ JavaScript	Camera and GPS Features
-🔐 Werkzeug	Password Security
-📁 Project Structure
+Run the application:
+
+python app.py
+
+Open the application in your browser:
+
+http://127.0.0.1:5000
+Project Structure
 SIMMS/
-│
 ├── app.py
 ├── requirements.txt
 ├── inspection.db
-│
 ├── uploads/
-│   └── Inspection evidence images
-│
 ├── face_captures/
-│   └── Verification photos
-│
 └── README.md
-🚀 Installation and Setup
-1️⃣ Clone the Repository
-git clone <your-repository-url>
-cd SIMMS
-2️⃣ Install Dependencies
-pip install -r requirements.txt
-3️⃣ Run the Application
-python app.py
-4️⃣ Open in Browser
+Demo Accounts
+Authority: ADMIN001
+Inspector: INS001
+Worker: WORK001
+Project Purpose
 
-Open:
+SIMMS aims to make the inspection process more organized, transparent, and efficient by providing a centralized platform for inspection management and monitoring.
 
-http://127.0.0.1:5000
-
-🔐 Default Demo Accounts
-Role	Unique ID	Password
-👩‍💼 Authority	ADMIN001	admin123
-🔍 Inspector	INS001	inspector123
-👷 Worker	WORK001	worker123
-
-⚠️ Note: These accounts are provided only for demonstration and testing purposes. Passwords should be changed in a production environment.
-
-📸 Core Modules
-🔐 Authentication & Role-Based Access
-👥 User Management
-🎲 Automated Inspection Assignment
-📷 Face Verification
-📋 Field Inspection
-📸 Evidence Upload
-📍 GPS Location Capture
-📊 Real-Time Dashboard
-🤖 Smart Priority Analysis
-📈 Analytics
-📹 CCTV Link Management
-🎥 Team Meeting Coordination
-🌟 Future Enhancements
-🔔 Real-time browser push notifications
-🤖 AI-based issue detection from images
-🗺️ Interactive map integration
-📱 Mobile application support
-📹 Live CCTV streaming integration
-📧 Email and SMS notifications
-👤 Advanced facial recognition
-👥 Project Team
-
-Project Name: SIMMS
-Full Form: Smart Inspection & Monitoring Management System
-
-SIMMS aims to make inspection processes smarter, faster, transparent, and easier to manage through digital technology.
-
-📄 License
-
-This project is developed for educational and academic purposes.
-
-⭐ If you like this project, don't forget to star the repository!
+Future Improvements
+Real-time notifications
+AI-based issue detection
+Interactive maps
+Live CCTV integration
+Mobile application support
