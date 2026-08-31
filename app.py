@@ -1,879 +1,2450 @@
-from flask import Flask, request, redirect, url_for, session, send_from_directory, jsonify, render_template_string, abort
+from flask import Flask, request, redirect, url_for, session, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from datetime import datetime
+from functools import wraps
 import sqlite3
 import os
 import uuid
 import random
-from datetime import datetime
-from urllib.parse import urlparse
-from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
+import base64
+import numpy as np
+import face_recognition
+
+
+# ============================================================
+# APP CONFIGURATION
+# ============================================================
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key-in-render")
+app.secret_key = os.environ.get(
+    "SECRET_KEY",
+    "change-this-secret-key-in-production"
+)
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATABASE = os.path.join(BASE_DIR, "inspection.db")
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-FACE_FOLDER = os.path.join(BASE_DIR, "face_captures")
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+DB_NAME = "inspection.db"
+UPLOAD_FOLDER = "uploads"
+FACE_FOLDER = os.path.join(UPLOAD_FOLDER, "faces")
 
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["FACE_FOLDER"] = FACE_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(FACE_FOLDER, exist_ok=True)
 
-STYLE = r"""
-<style>
-*{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#f5f7fb;color:#172033}a{text-decoration:none;color:inherit}.navbar{position:sticky;top:0;z-index:50;background:#fff;border-bottom:1px solid #e7ebf3;padding:14px 5%;display:flex;justify-content:space-between;align-items:center;gap:15px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;color:#172554}.brand-icon{width:38px;height:38px;border-radius:11px;background:#2563eb;color:#fff;display:grid;place-items:center}.navlinks{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.navlinks a{padding:9px 11px;border-radius:9px;color:#475569;font-size:14px}.navlinks a:hover{background:#eef4ff;color:#1d4ed8}.container{max-width:1280px;margin:auto;padding:28px 20px}.hero{background:linear-gradient(135deg,#eff6ff,#fff);border:1px solid #dbeafe;border-radius:26px;padding:58px 28px;text-align:center}.hero h1{font-size:43px;line-height:1.1;color:#17327c;margin:0 auto 16px;max-width:950px}.hero p{font-size:18px;color:#64748b;max-width:820px;margin:0 auto 26px;line-height:1.7}.card{background:#fff;border:1px solid #e7ebf3;border-radius:18px;padding:23px;margin-bottom:20px;box-shadow:0 8px 28px rgba(15,23,42,.05)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:17px}.feature{background:#fff;border:1px solid #e7ebf3;border-radius:18px;padding:21px}.feature-icon{font-size:29px}.feature h3{margin:9px 0 7px;color:#1e3a8a}.feature p{color:#64748b;line-height:1.55}.btn{display:inline-block;border:0;background:#2563eb;color:#fff;padding:10px 16px;border-radius:9px;cursor:pointer;font-weight:700;font-size:14px;margin:3px}.btn:hover{filter:brightness(.95)}.btn-green{background:#059669}.btn-purple{background:#7c3aed}.btn-orange{background:#ea580c}.btn-red{background:#dc2626}.btn-dark{background:#334155}.btn-light{background:#eef4ff;color:#1d4ed8}.section-title{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}.section-title h1,.section-title h2{margin:0;color:#172554}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin:20px 0}.stat{background:#fff;border:1px solid #e7ebf3;border-radius:16px;padding:18px}.stat .num{font-size:30px;font-weight:800;color:#2563eb}.stat small{color:#64748b}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.field label{display:block;font-weight:700;font-size:14px;margin-bottom:6px;color:#334155}input,select,textarea{width:100%;padding:11px 12px;border:1px solid #cbd5e1;border-radius:9px;font-size:15px;background:#fff}textarea{min-height:110px;resize:vertical}.full{grid-column:1/-1}.info{background:#eff6ff;border:1px solid #bfdbfe;border-left:5px solid #2563eb;padding:13px 15px;border-radius:10px;margin:14px 0;line-height:1.6}.success{background:#ecfdf5;border-color:#a7f3d0;border-left-color:#059669}.warning{background:#fff7ed;border-color:#fed7aa;border-left-color:#ea580c}.danger{background:#fef2f2;border-color:#fecaca;border-left-color:#dc2626}.error{color:#b91c1c;font-weight:700}.badge{display:inline-block;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}.low{background:#dcfce7;color:#166534}.medium{background:#fef3c7;color:#92400e}.high{background:#fee2e2;color:#991b1b}.blue{background:#dbeafe;color:#1e40af}.purple{background:#ede9fe;color:#6d28d9}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:850px}th{background:#172554;color:#fff}th,td{padding:11px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:middle}tr:hover td{background:#f8fafc}.evidence{width:95px;height:70px;object-fit:cover;border-radius:8px}.workflow{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;font-weight:700;color:#334155}.step{background:#eff6ff;border:1px solid #bfdbfe;padding:10px 13px;border-radius:10px}.footer{text-align:center;color:#64748b;padding:30px}.camera{width:100%;background:#0f172a;border-radius:14px;min-height:280px;object-fit:cover}.login-box{max-width:480px;margin:42px auto}.role{font-size:12px;background:#eef2ff;color:#3730a3;padding:5px 9px;border-radius:999px;font-weight:800}.empty{text-align:center;padding:35px;color:#64748b}.pill-row{display:flex;gap:8px;flex-wrap:wrap}.meeting-code{font-family:monospace;font-size:20px;font-weight:800;letter-spacing:2px}.notice{position:fixed;right:18px;bottom:18px;z-index:100;background:#172554;color:#fff;padding:14px 17px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.2);display:none}.progress{height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden}.progress>span{display:block;height:100%;background:#2563eb}.two-col{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.checklist{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.mini{font-size:13px;color:#64748b}.metric{font-size:25px;font-weight:800;color:#172554}@media(max-width:850px){.two-col{grid-template-columns:1fr}.checklist{grid-template-columns:1fr 1fr}}@media(max-width:700px){.navbar{align-items:flex-start;flex-direction:column}.hero{padding:40px 17px}.hero h1{font-size:30px}.container{padding:18px 12px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}.card{padding:17px}.checklist{grid-template-columns:1fr}}
-</style>
-"""
-
-LAYOUT = r"""
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title or 'SIMMS' }}</title></head><body>
-{{ navbar|safe }}
-<main class="container">{{ body|safe }}</main>
-<div class="footer">SIMMS • Smart Real-Time Monitoring & Inspection System • SIH 26095</div>
-</body></html>
-"""
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["FACE_FOLDER"] = FACE_FOLDER
 
 
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# ============================================================
+# DATABASE
+# ============================================================
 
-
-def db():
-    conn = sqlite3.connect(DATABASE)
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
-def logged_in():
-    return "user_id" in session
-
-
-def role_required(*roles):
-    return logged_in() and session.get("role") in roles
-
-
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-def esc(value):
-    if value is None:
-        return ""
-    return (str(value).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
-
-
-def badge(value, kind="priority"):
-    if kind == "priority":
-        cls = {"Low": "low", "Medium": "medium", "High": "high"}.get(value, "blue")
-    elif kind == "status":
-        cls = {"Reported": "high", "In Progress": "medium", "Resolved": "low", "Assigned": "blue", "Accepted": "purple", "Completed": "low"}.get(value, "blue")
-    else:
-        cls = "blue"
-    return f'<span class="badge {cls}">{esc(value)}</span>'
-
-
-def safe_external_url(value):
-    """Allow only normal http/https URLs for stored CCTV links."""
-    parsed = urlparse(value)
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-
-
-def page(body, title="SIMMS"):
-    return render_template_string(STYLE + LAYOUT, body=body, navbar=nav(), title=title)
-
-
-def nav():
-    if not logged_in():
-        return '<div class="navbar"><a class="brand" href="/"><span class="brand-icon">🏛️</span> SIMMS</a><div class="navlinks"><a href="/login">🔐 Login</a></div></div>'
-
-    role = session.get("role")
-    links = ['<a href="/home">🏠 Home</a>']
-    if role == "Authority":
-        links += [
-            '<a href="/dashboard">📊 Dashboard</a>',
-            '<a href="/assignments">🎲 Assign</a>',
-            '<a href="/users">👥 Users</a>',
-            '<a href="/analytics">📈 Analytics</a>',
-            '<a href="/cctv">📹 CCTV</a>',
-            '<a href="/meetings">🎥 Meetings</a>',
-        ]
-    elif role == "Inspector":
-        links += [
-            '<a href="/my-inspections">📋 My Inspections</a>',
-            '<a href="/meetings">🎥 Meetings</a>',
-        ]
-    elif role == "Project Staff":
-        links += [
-            '<a href="/my-work">🛠️ My Work</a>',
-            '<a href="/meetings">🎥 Meetings</a>',
-        ]
-    elif role == "Beneficiary":
-        links += [
-            '<a href="/beneficiary">🙋 My Services</a>',
-            '<a href="/meetings">🎥 Meetings</a>',
-        ]
-    links.append('<a href="/logout">🚪 Logout</a>')
-    return f'<div class="navbar"><a class="brand" href="/home"><span class="brand-icon">🏛️</span> SIMMS</a><div class="navlinks">{"".join(links)}</div></div>'
-
-
 def init_db():
-    conn = db()
+    conn = get_db()
+
     conn.executescript("""
-    CREATE TABLE IF NOT EXISTS users(
+    CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        unique_id TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('Authority','Inspector','Project Staff','Beneficiary')),
-        created_at TEXT NOT NULL
+        role TEXT NOT NULL DEFAULT 'staff',
+        face_image TEXT,
+        face_encoding TEXT,
+        created_at TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS projects(
+    CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        project_type TEXT NOT NULL,
-        location TEXT NOT NULL,
-        contact_name TEXT,
-        created_at TEXT NOT NULL
+        location TEXT,
+        incharge TEXT,
+        cctv_url TEXT,
+        status TEXT DEFAULT 'Active',
+        created_at TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS assignments(
+    CREATE TABLE IF NOT EXISTS inspections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        inspector_id INTEGER NOT NULL,
         project_id INTEGER,
-        location TEXT NOT NULL,
-        instructions TEXT,
-        assigned_at TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Assigned',
-        face_verified INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY(inspector_id) REFERENCES users(id),
-        FOREIGN KEY(project_id) REFERENCES projects(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS work_assignments(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        staff_id INTEGER NOT NULL,
-        project_id INTEGER,
-        title TEXT NOT NULL,
-        location TEXT NOT NULL,
-        instructions TEXT,
-        assigned_at TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Assigned',
-        evidence_photo TEXT,
+        inspector_id INTEGER,
+        title TEXT,
+        status TEXT DEFAULT 'Assigned',
         latitude TEXT,
         longitude TEXT,
-        completed_at TEXT,
-        FOREIGN KEY(staff_id) REFERENCES users(id),
-        FOREIGN KEY(project_id) REFERENCES projects(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS issues(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        assignment_id INTEGER,
-        project_id INTEGER,
-        location TEXT NOT NULL,
-        issue_type TEXT NOT NULL,
-        description TEXT,
-        created_at TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Reported',
-        priority TEXT NOT NULL DEFAULT 'Low',
-        photo TEXT,
-        reporter_id INTEGER,
-        latitude TEXT,
-        longitude TEXT,
-        verified INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY(assignment_id) REFERENCES assignments(id),
+        checklist TEXT,
+        evidence TEXT,
+        remarks TEXT,
+        created_at TEXT,
         FOREIGN KEY(project_id) REFERENCES projects(id),
-        FOREIGN KEY(reporter_id) REFERENCES users(id)
+        FOREIGN KEY(inspector_id) REFERENCES users(id)
     );
 
-    CREATE TABLE IF NOT EXISTS cctv_feeds(
+    CREATE TABLE IF NOT EXISTS issues (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id INTEGER,
-        location TEXT NOT NULL,
-        feed_url TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(project_id) REFERENCES projects(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS meetings(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inspection_id INTEGER,
         title TEXT NOT NULL,
-        meeting_url TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        created_by INTEGER,
-        meeting_code TEXT UNIQUE NOT NULL,
-        FOREIGN KEY(created_by) REFERENCES users(id)
+        description TEXT,
+        severity TEXT DEFAULT 'Medium',
+        status TEXT DEFAULT 'Open',
+        resolution TEXT,
+        created_at TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS meeting_participants(
+    CREATE TABLE IF NOT EXISTS attendance (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        meeting_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        joined_at TEXT NOT NULL,
-        UNIQUE(meeting_id,user_id),
-        FOREIGN KEY(meeting_id) REFERENCES meetings(id),
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS attendance(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
+        user_id INTEGER,
         project_id INTEGER,
-        attendance_date TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Present',
-        captured_at TEXT NOT NULL,
-        FOREIGN KEY(user_id) REFERENCES users(id),
-        FOREIGN KEY(project_id) REFERENCES projects(id)
+        latitude TEXT,
+        longitude TEXT,
+        photo TEXT,
+        attendance_date TEXT,
+        status TEXT DEFAULT 'Present'
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        message TEXT,
+        is_read INTEGER DEFAULT 0,
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS meetings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER,
+        title TEXT,
+        meeting_url TEXT,
+        meeting_time TEXT,
+        created_at TEXT
     );
     """)
 
-    defaults = [
-        ("ADMIN001", "System Authority", "admin123", "Authority"),
-        ("PMU001", "PMU Inspection Officer", "pmu123", "Inspector"),
-        ("STAFF001", "Project Staff Demo", "staff123", "Project Staff"),
-        ("BEN001", "Beneficiary Demo", "beneficiary123", "Beneficiary"),
+    # Support existing databases created before face columns were added
+    columns = [
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(users)").fetchall()
     ]
-    for uid, name, pwd, role in defaults:
-        if conn.execute("SELECT 1 FROM users WHERE unique_id=?", (uid,)).fetchone() is None:
-            conn.execute(
-                "INSERT INTO users(unique_id,name,password,role,created_at) VALUES(?,?,?,?,?)",
-                (uid, name, generate_password_hash(pwd), role, now()),
-            )
 
-    if conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
-        conn.execute(
-            "INSERT INTO projects(name,project_type,location,contact_name,created_at) VALUES(?,?,?,?,?)",
-            ("Demo Social Welfare Institute", "DoSJE Scheme", "Raipur District", "Project Incharge", now()),
-        )
+    if "face_image" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN face_image TEXT")
+
+    if "face_encoding" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN face_encoding TEXT")
+
     conn.commit()
     conn.close()
 
 
-init_db()
+# ============================================================
+# SECURITY HELPERS
+# ============================================================
 
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def role_required(*roles):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if "user_id" not in session:
+                return redirect(url_for("login"))
+
+            if session.get("role") not in roles:
+                return "Access Denied", 403
+
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
+
+
+def notify(user_id, message):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO notifications (user_id, message, created_at)
+        VALUES (?, ?, ?)
+    """, (
+        user_id,
+        message,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    ))
+    conn.commit()
+    conn.close()
+
+
+def allowed_file(filename):
+    return (
+        "." in filename and
+        filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
+
+
+def save_file(file):
+    if file and file.filename and allowed_file(file.filename):
+        ext = file.filename.rsplit(".", 1)[1].lower()
+        filename = f"{uuid.uuid4().hex}.{ext}"
+        file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+        return filename
+    return None
+
+
+# ============================================================
+# FACE RECOGNITION FUNCTIONS
+# ============================================================
+
+def save_camera_image(data_url, folder=FACE_FOLDER):
+    """
+    Receives a Base64 image from browser camera
+    and saves it as an image file.
+    """
+
+    if not data_url:
+        return None
+
+    try:
+        header, encoded = data_url.split(",", 1)
+        image_data = base64.b64decode(encoded)
+
+        filename = f"{uuid.uuid4().hex}.jpg"
+        filepath = os.path.join(folder, filename)
+
+        with open(filepath, "wb") as file:
+            file.write(image_data)
+
+        return filename
+
+    except Exception as e:
+        print("Camera image error:", e)
+        return None
+
+
+def create_face_encoding(filename):
+    """
+    Creates a numerical face encoding from an image.
+    Exactly one face should ideally be visible.
+    """
+
+    if not filename:
+        return None
+
+    filepath = os.path.join(FACE_FOLDER, filename)
+
+    try:
+        image = face_recognition.load_image_file(filepath)
+        encodings = face_recognition.face_encodings(image)
+
+        if len(encodings) != 1:
+            return None
+
+        return ",".join(map(str, encodings[0]))
+
+    except Exception as e:
+        print("Face encoding error:", e)
+        return None
+
+
+def verify_user_face(user_id, camera_data):
+    """
+    Compares the current camera image with the
+    registered face of the logged-in user.
+    """
+
+    conn = get_db()
+
+    user = conn.execute("""
+        SELECT face_encoding
+        FROM users
+        WHERE id=?
+    """, (user_id,)).fetchone()
+
+    conn.close()
+
+    if not user or not user["face_encoding"]:
+        return False, "No registered face found."
+
+    temp_filename = save_camera_image(camera_data)
+
+    if not temp_filename:
+        return False, "Camera image could not be captured."
+
+    filepath = os.path.join(FACE_FOLDER, temp_filename)
+
+    try:
+        known_encoding = np.array(
+            [float(x) for x in user["face_encoding"].split(",")]
+        )
+
+        image = face_recognition.load_image_file(filepath)
+        current_encodings = face_recognition.face_encodings(image)
+
+        # Remove temporary verification image
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        if len(current_encodings) != 1:
+            return False, "Please ensure exactly one face is visible."
+
+        distance = face_recognition.face_distance(
+            [known_encoding],
+            current_encodings[0]
+        )[0]
+
+        # Lower distance = better match
+        # 0.50 gives reasonably strict verification
+        if distance < 0.50:
+            return True, f"Face verified successfully (confidence score: {round((1-distance)*100, 1)}%)"
+
+        return False, "Face does not match the registered identity."
+
+    except Exception as e:
+        print("Face verification error:", e)
+        return False, "Face verification failed."
+
+
+# ============================================================
+# BASE HTML / UI
+# ============================================================
+
+def page(title, content):
+
+    user = session.get("name", "")
+    role = session.get("role", "")
+
+    nav = ""
+
+    if session.get("user_id"):
+
+        staff_link = ""
+        if role in ["staff", "worker"]:
+            staff_link = '<a href="/staff-report">🛠️ Staff Report</a>'
+
+        nav = f"""
+        <div class="sidebar">
+            <h2>🛡️ SmartInspect</h2>
+
+            <p class="user">
+                👤 {user}<br>
+                <small>{role.upper()}</small>
+            </p>
+
+            <a href="/dashboard">📊 Dashboard</a>
+            <a href="/projects">🏢 Projects</a>
+            <a href="/inspections">📋 Inspections</a>
+            {staff_link}
+            <a href="/attendance">👥 Attendance</a>
+            <a href="/issues">⚠️ Issues</a>
+            <a href="/meetings">🎥 Meetings</a>
+            <a href="/notifications">
+                🔔 Notifications <span id="notificationBadge"></span>
+            </a>
+            <a href="/analytics">📈 Analytics</a>
+            <a href="/logout">🚪 Logout</a>
+        </div>
+        """
+
+    margin = "250px" if session.get("user_id") else "0"
+
+    notification_script = ""
+
+    if session.get("user_id"):
+        notification_script = """
+        <script>
+        let previousNotificationCount = null;
+
+        async function checkNotifications() {
+            try {
+                const response = await fetch('/api/notification-count');
+                const data = await response.json();
+
+                const badge = document.getElementById('notificationBadge');
+
+                if (data.unread_notifications > 0) {
+                    badge.innerHTML = '(' + data.unread_notifications + ')';
+
+                    if (
+                        previousNotificationCount !== null &&
+                        data.unread_notifications > previousNotificationCount
+                    ) {
+                        alert('🔔 You have a new SmartInspect notification!');
+                    }
+
+                } else {
+                    badge.innerHTML = '';
+                }
+
+                previousNotificationCount = data.unread_notifications;
+
+            } catch (error) {
+                console.log("Notification check failed");
+            }
+        }
+
+        checkNotifications();
+        setInterval(checkNotifications, 30000);
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{title} | SmartInspect</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+
+        <style>
+
+            * {{
+                box-sizing: border-box;
+            }}
+
+            body {{
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: #f4f7fb;
+                color: #1e293b;
+            }}
+
+            .sidebar {{
+                width: 230px;
+                position: fixed;
+                height: 100vh;
+                background: #0f172a;
+                padding: 20px;
+                color: white;
+                overflow-y: auto;
+            }}
+
+            .sidebar h2 {{
+                color: #38bdf8;
+            }}
+
+            .sidebar a {{
+                display: block;
+                padding: 12px;
+                margin: 5px 0;
+                color: white;
+                text-decoration: none;
+                border-radius: 8px;
+            }}
+
+            .sidebar a:hover {{
+                background: #1e293b;
+            }}
+
+            .user {{
+                background: #1e293b;
+                padding: 10px;
+                border-radius: 8px;
+            }}
+
+            .main {{
+                margin-left: {margin};
+                padding: 30px;
+                max-width: 1400px;
+            }}
+
+            .card {{
+                background: white;
+                padding: 20px;
+                border-radius: 14px;
+                box-shadow: 0 3px 12px rgba(0,0,0,.08);
+                margin-bottom: 20px;
+            }}
+
+            .grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px,1fr));
+                gap: 18px;
+            }}
+
+            .stat {{
+                background: white;
+                padding: 22px;
+                border-radius: 14px;
+                box-shadow: 0 3px 12px rgba(0,0,0,.08);
+            }}
+
+            input, select, textarea {{
+                width: 100%;
+                padding: 11px;
+                margin: 7px 0 15px;
+                border: 1px solid #cbd5e1;
+                border-radius: 7px;
+            }}
+
+            button, .btn {{
+                background: #2563eb;
+                color: white;
+                border: none;
+                padding: 11px 18px;
+                border-radius: 7px;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
+                margin: 3px;
+            }}
+
+            button:hover {{
+                background: #1d4ed8;
+            }}
+
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: white;
+            }}
+
+            th, td {{
+                padding: 12px;
+                border-bottom: 1px solid #e2e8f0;
+                text-align: left;
+            }}
+
+            th {{
+                background: #eff6ff;
+            }}
+
+            .login {{
+                max-width: 500px;
+                margin: 70px auto;
+            }}
+
+            .success {{
+                background: #dcfce7;
+                padding: 12px;
+                border-radius: 8px;
+            }}
+
+            .warning {{
+                background: #fef3c7;
+                padding: 12px;
+                border-radius: 8px;
+            }}
+
+            .danger {{
+                background: #fee2e2;
+                padding: 12px;
+                border-radius: 8px;
+            }}
+
+            video, canvas {{
+                width: 100%;
+                max-width: 400px;
+                border-radius: 10px;
+                margin-bottom: 10px;
+            }}
+
+            #notificationBadge {{
+                color: #fbbf24;
+                font-weight: bold;
+            }}
+
+            @media(max-width:700px) {{
+                .sidebar {{
+                    position: relative;
+                    width: 100%;
+                    height: auto;
+                }}
+
+                .main {{
+                    margin-left: 0;
+                    padding: 15px;
+                }}
+            }}
+
+        </style>
+    </head>
+
+    <body>
+
+        {nav}
+
+        <div class="main">
+            {content}
+        </div>
+
+        {notification_script}
+
+    </body>
+    </html>
+    """
+
+
+# ============================================================
+# HOME
+# ============================================================
 
 @app.route("/")
-def landing():
-    body = '''
-    <section class="hero">
-      <div class="pill-row" style="justify-content:center"><span class="role">SMART INDIA HACKATHON • SIH 26095</span></div>
-      <h1>Smart Real-Time Monitoring & Inspection Mobile App</h1>
-      <p>Centralized monitoring for DoSJE schemes with surprise inspections, random PMU inspection assignment, CCTV integration, random VC coordination, geo-tagged evidence and analytics.</p>
-      <a class="btn" href="/login">🔐 Login</a>
-      <a class="btn btn-light" href="#features">Explore Features</a>
-    </section>
-    <section id="features" class="grid" style="margin-top:22px">
-      <div class="feature"><div class="feature-icon">🎲</div><h3>Random Inspection Assignment</h3><p>Authority can randomly assign inspection duties to eligible PMU/Inspection Team members.</p></div>
-      <div class="feature"><div class="feature-icon">📍</div><h3>Geo-Tagged Reports</h3><p>Inspectors can capture latitude, longitude, time and photo evidence with an inspection report.</p></div>
-      <div class="feature"><div class="feature-icon">📹</div><h3>CCTV Integration</h3><p>Authorized monitoring URLs can be registered and opened from the central dashboard.</p></div>
-      <div class="feature"><div class="feature-icon">🎥</div><h3>Random VC Coordination</h3><p>Authority can create meeting rooms for interaction with project staff and beneficiaries.</p></div>
-      <div class="feature"><div class="feature-icon">📊</div><h3>Anomaly Analytics</h3><p>Repeated findings, attendance gaps and inspection activity are summarized for prototype monitoring.</p></div>
-      <div class="feature"><div class="feature-icon">👥</div><h3>Role Separation</h3><p>Authority, PMU Inspector, Project Staff and Beneficiary have separate workspaces and permissions.</p></div>
-    </section>
-    <div class="card" style="margin-top:22px"><h2>SIH 26095 Workflow</h2><div class="workflow"><span class="step">Authority</span>→<span class="step">Random PMU Assignment</span>→<span class="step">Inspect</span>→<span class="step">GPS + Evidence</span>→<span class="step">Analytics</span>→<span class="step">Verify & Resolve</span></div></div>
-    <div class="card"><h2>Prototype Roles</h2><div class="grid"><div class="feature"><b>Authority</b><p>DoSJE / State / District monitoring role.</p></div><div class="feature"><b>Inspector</b><p>PMU / Inspection Team member who performs inspections.</p></div><div class="feature"><b>Project Staff</b><p>Project/Institute/NGO-side staff who can participate in coordination and provide updates.</p></div><div class="feature"><b>Beneficiary</b><p>Service beneficiary who can participate in VC/feedback workflows.</p></div></div></div>
-    '''
-    return page(body, "SIMMS • SIH 26095")
+def home():
 
+    if "user_id" in session:
+        return redirect(url_for("dashboard"))
+
+    return page("SmartInspect", """
+    <div class="login card">
+        <h1>🛡️ SmartInspect</h1>
+        <h3>Real-Time Monitoring & Inspection System</h3>
+
+        <p>
+        Centralized platform for transparent monitoring,
+        surprise inspections, attendance verification,
+        CCTV integration and compliance management.
+        </p>
+
+        <a class="btn" href="/login">🔐 Login</a>
+        <a class="btn" href="/register">👤 Register</a>
+    </div>
+    """)
+
+
+# ============================================================
+# REGISTER WITH FACE CAPTURE
+# ============================================================
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+
+    message = ""
+
+    if request.method == "POST":
+
+        name = request.form["name"]
+        email = request.form["email"].lower()
+        password = request.form["password"]
+        face_data = request.form.get("face_data")
+
+        if not face_data:
+            message = """
+            <p class='danger'>
+            📷 Face registration is required for security.
+            Please capture your face using the camera.
+            </p>
+            """
+        else:
+
+            face_image = save_camera_image(face_data)
+            face_encoding = create_face_encoding(face_image)
+
+            if not face_encoding:
+
+                # Delete invalid image
+                if face_image:
+                    path = os.path.join(FACE_FOLDER, face_image)
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                message = """
+                <p class='danger'>
+                Face registration failed. Please ensure only one
+                face is clearly visible and try again.
+                </p>
+                """
+
+            else:
+
+                conn = get_db()
+
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM users"
+                ).fetchone()[0]
+
+                # First registered account becomes admin
+                role = "admin" if count == 0 else "staff"
+
+                try:
+
+                    conn.execute("""
+                        INSERT INTO users(
+                            name, email, password, role,
+                            face_image, face_encoding, created_at
+                        )
+                        VALUES(?,?,?,?,?,?,?)
+                    """, (
+                        name,
+                        email,
+                        generate_password_hash(password),
+                        role,
+                        face_image,
+                        face_encoding,
+                        datetime.now().strftime("%Y-%m-%d %H:%M")
+                    ))
+
+                    conn.commit()
+                    conn.close()
+
+                    return redirect(url_for("login"))
+
+                except sqlite3.IntegrityError:
+
+                    conn.close()
+
+                    message = """
+                    <p class='danger'>
+                    Email already registered.
+                    </p>
+                    """
+
+    return page("Register", f"""
+    <div class="login card">
+
+        <h2>👤 Create Secure Account</h2>
+
+        {message}
+
+        <form method="POST" id="registerForm">
+
+            <input name="name"
+                   placeholder="Full Name"
+                   required>
+
+            <input type="email"
+                   name="email"
+                   placeholder="Official Email"
+                   required>
+
+            <input type="password"
+                   name="password"
+                   placeholder="Password"
+                   required>
+
+            <h3>📷 Face Registration</h3>
+
+            <p>
+            Your face is registered securely for identity
+            verification during attendance and inspections.
+            </p>
+
+            <video id="video"
+                   autoplay
+                   playsinline>
+            </video>
+
+            <canvas id="canvas"
+                    style="display:none">
+            </canvas>
+
+            <input type="hidden"
+                   name="face_data"
+                   id="face_data">
+
+            <br>
+
+            <button type="button"
+                    onclick="startCamera()">
+                📷 Start Camera
+            </button>
+
+            <button type="button"
+                    onclick="captureFace()">
+                📸 Capture Face
+            </button>
+
+            <p id="faceStatus"></p>
+
+            <button type="submit">
+                🔐 Create Secure Account
+            </button>
+
+        </form>
+
+        <p>
+            Already registered?
+            <a href="/login">Login</a>
+        </p>
+
+    </div>
+
+    <script>
+
+    let stream;
+
+    async function startCamera() {{
+
+        try {{
+
+            stream = await navigator.mediaDevices.getUserMedia({{
+                video: {{
+                    facingMode: "user"
+                }}
+            }});
+
+            document.getElementById("video").srcObject = stream;
+
+            document.getElementById("faceStatus").innerHTML =
+                "📷 Camera started. Position your face clearly.";
+
+        }} catch(error) {{
+
+            document.getElementById("faceStatus").innerHTML =
+                "⚠️ Camera permission is required.";
+
+        }}
+    }}
+
+    function captureFace() {{
+
+        const video = document.getElementById("video");
+        const canvas = document.getElementById("canvas");
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context = canvas.getContext("2d");
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        document.getElementById("face_data").value =
+            canvas.toDataURL("image/jpeg");
+
+        document.getElementById("faceStatus").innerHTML =
+            "✅ Face captured successfully. You can create your account.";
+
+    }}
+
+    </script>
+    """)
+
+
+# ============================================================
+# LOGIN
+# ============================================================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if logged_in():
-        return redirect(url_for("home"))
+
     error = ""
+
     if request.method == "POST":
-        uid = request.form.get("unique_id", "").strip().upper()
-        password = request.form.get("password", "")
-        conn = db()
-        user = conn.execute("SELECT * FROM users WHERE unique_id=?", (uid,)).fetchone()
+
+        email = request.form["email"].lower()
+        password = request.form["password"]
+
+        conn = get_db()
+
+        user = conn.execute(
+            "SELECT * FROM users WHERE email=?",
+            (email,)
+        ).fetchone()
+
         conn.close()
-        if user and check_password_hash(user["password"], password):
-            session.clear()
+
+        if user and check_password_hash(
+            user["password"],
+            password
+        ):
+
             session["user_id"] = user["id"]
             session["name"] = user["name"]
             session["role"] = user["role"]
-            return redirect(url_for("home"))
-        error = "Invalid Unique ID or Password."
-    body = f'''
-    <div class="card login-box"><div style="text-align:center"><div class="brand-icon" style="margin:auto">🔐</div><h1 style="color:#172554">System Login</h1><p style="color:#64748b">Sign in to your SIH 26095 workspace.</p></div>
-    {f'<div class="info danger">❌ {esc(error)}</div>' if error else ''}
-    <form method="POST"><div class="field"><label>Unique ID</label><input name="unique_id" placeholder="ADMIN001 / PMU001 / STAFF001 / BEN001" required></div><div class="field" style="margin-top:12px"><label>Password</label><input type="password" name="password" placeholder="Enter password" required></div><button class="btn" style="width:100%;margin-top:12px">Login</button></form>
-    <div class="info" style="margin-top:18px"><b>Demo accounts</b><br>Authority: ADMIN001 / admin123<br>PMU Inspector: PMU001 / pmu123<br>Project Staff: STAFF001 / staff123<br>Beneficiary: BEN001 / beneficiary123</div><a href="/">← Back to home</a></div>'''
-    return page(body, "Login")
+
+            return redirect(url_for("dashboard"))
+
+        error = """
+        <p class='danger'>
+        Invalid email or password.
+        </p>
+        """
+
+    return page("Login", f"""
+    <div class="login card">
+
+        <h2>🔐 Secure Login</h2>
+
+        {error}
+
+        <form method="POST">
+
+            <input type="email"
+                   name="email"
+                   placeholder="Email"
+                   required>
+
+            <input type="password"
+                   name="password"
+                   placeholder="Password"
+                   required>
+
+            <button>Login Securely</button>
+
+        </form>
+
+    </div>
+    """)
 
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("landing"))
+    return redirect(url_for("home"))
 
 
-@app.route("/home")
-def home():
-    if not logged_in():
-        return redirect(url_for("login"))
-    role = session["role"]
-    if role == "Authority":
-        buttons = '<a class="btn" href="/dashboard">📊 Dashboard</a><a class="btn btn-orange" href="/assignments">🎲 Assign Inspection</a><a class="btn btn-green" href="/assignments-staff-form">🛠️ Assign Staff Work</a><a class="btn btn-purple" href="/users">👥 Users</a><a class="btn btn-dark" href="/attendance">👥 Attendance</a><a class="btn btn-green" href="/projects">🏢 Projects</a>'
-        description = "Monitor DoSJE scheme projects, assign PMU inspections and review evidence."
-    elif role == "Inspector":
-        buttons = '<a class="btn btn-purple" href="/my-inspections">📋 My Inspections</a><a class="btn" href="/meetings">🎥 Meetings</a>'
-        description = "Complete assigned PMU/Inspection Team duties with GPS and evidence."
-    elif role == "Project Staff":
-        buttons = '<a class="btn btn-green" href="/my-work">🛠️ My Work</a><a class="btn" href="/meetings">🎥 Meetings</a>'
-        description = "Handle project-side work, submit evidence and participate in coordination."
-    else:
-        buttons = '<a class="btn btn-purple" href="/beneficiary">🙋 My Services</a><a class="btn" href="/meetings">🎥 Meetings</a>'
-        description = "Access beneficiary-side information and coordination."
-    body = f'''<div class="card"><div class="section-title"><div><h1>Welcome, {esc(session["name"])} 👋</h1><p style="color:#64748b">{esc(description)}</p></div><span class="role">{esc(role)}</span></div><div class="info">🔐 Role-based access is enabled. Your modules are separated according to the SIH 26095 workflow.</div><div class="pill-row">{buttons}</div></div>'''
-    return page(body, "Home")
-
-
-@app.route("/users", methods=["GET", "POST"])
-def users():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    message = ""
-    if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        password = request.form.get("password", "")
-        role = request.form.get("role", "")
-        if not name or len(password) < 4 or role not in ("Authority", "Inspector", "Project Staff", "Beneficiary"):
-            message = '<div class="info warning">Enter a valid name, password of at least 4 characters and supported role.</div>'
-        else:
-            prefix = {"Authority": "AUTH", "Inspector": "PMU", "Project Staff": "STAFF", "Beneficiary": "BEN"}[role]
-            uid = prefix + uuid.uuid4().hex[:6].upper()
-            conn = db()
-            conn.execute("INSERT INTO users(unique_id,name,password,role,created_at) VALUES(?,?,?,?,?)", (uid, name, generate_password_hash(password), role, now()))
-            conn.commit()
-            conn.close()
-            message = f'<div class="info success">✅ User created. ID: <b>{esc(uid)}</b> • Role: <b>{esc(role)}</b></div>'
-    conn = db()
-    rows = conn.execute("SELECT unique_id,name,role,created_at FROM users ORDER BY id DESC").fetchall()
-    conn.close()
-    trs = "".join(f'<tr><td>{esc(r["unique_id"])}</td><td>{esc(r["name"])}</td><td>{esc(r["role"])}</td><td>{esc(r["created_at"])}</td></tr>' for r in rows)
-    body = f'''<div class="card"><h1>👥 User Management</h1>{message}<form method="POST" class="form-grid"><div class="field"><label>Full Name</label><input name="name" required></div><div class="field"><label>Password</label><input type="password" name="password" required></div><div class="field"><label>Role</label><select name="role"><option>Inspector</option><option>Project Staff</option><option>Beneficiary</option><option>Authority</option></select></div><div class="field" style="display:flex;align-items:end"><button class="btn btn-purple">➕ Create User</button></div></form></div><div class="card"><h2>Registered Users</h2><div class="table-wrap"><table><tr><th>Unique ID</th><th>Name</th><th>Role</th><th>Created</th></tr>{trs}</table></div></div>'''
-    return page(body, "Users")
-
-
-@app.route("/projects", methods=["GET", "POST"])
-def projects():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    message = ""
-    if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        project_type = request.form.get("project_type", "").strip()
-        location = request.form.get("location", "").strip()
-        contact = request.form.get("contact_name", "").strip()
-        if not name or not project_type or not location:
-            message = '<div class="info warning">Project name, type and location are required.</div>'
-        else:
-            conn = db()
-            conn.execute("INSERT INTO projects(name,project_type,location,contact_name,created_at) VALUES(?,?,?,?,?)", (name, project_type, location, contact, now()))
-            conn.commit()
-            conn.close()
-            message = '<div class="info success">✅ Project/institute registered successfully.</div>'
-    conn = db()
-    rows = conn.execute("SELECT * FROM projects ORDER BY id DESC").fetchall()
-    conn.close()
-    trs = "".join(f'<tr><td>{esc(r["name"])}</td><td>{esc(r["project_type"])}</td><td>{esc(r["location"])}</td><td>{esc(r["contact_name"] or "-")}</td></tr>' for r in rows)
-    body = f'''<div class="card"><h1>🏢 Projects / Institutes / NGOs</h1>{message}<form method="POST" class="form-grid"><div class="field"><label>Project / Institute / NGO Name</label><input name="name" required></div><div class="field"><label>Scheme / Project Type</label><input name="project_type" placeholder="DoSJE Scheme" required></div><div class="field"><label>Location</label><input name="location" required></div><div class="field"><label>Project Incharge / Contact</label><input name="contact_name"></div><div class="full"><button class="btn btn-green">➕ Register Project</button></div></form></div><div class="card"><h2>Registered Projects</h2><div class="table-wrap"><table><tr><th>Name</th><th>Type</th><th>Location</th><th>Contact</th></tr>{trs or '<tr><td colspan="4" class="empty">No projects registered.</td></tr>'}</table></div></div>'''
-    return page(body, "Projects")
-
-
-@app.route("/assignments", methods=["GET", "POST"])
-def assignments():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    message = ""
-    conn = db()
-    inspectors = conn.execute("SELECT id,name,unique_id FROM users WHERE role='Inspector' ORDER BY name").fetchall()
-    projects_rows = conn.execute("SELECT id,name,location FROM projects ORDER BY name").fetchall()
-
-    if request.method == "POST":
-        project_id = request.form.get("project_id", "").strip()
-        location = request.form.get("location", "").strip()
-        instructions = request.form.get("instructions", "").strip()
-        selected_id = request.form.get("inspector_id", "random").strip()
-        if project_id and project_id.isdigit():
-            project = conn.execute("SELECT * FROM projects WHERE id=?", (int(project_id),)).fetchone()
-            if project:
-                location = project["location"]
-        else:
-            project = None
-        if not location:
-            message = '<div class="info warning">Select a project or enter a location.</div>'
-        elif not inspectors:
-            message = '<div class="info warning">No Inspector / PMU Team accounts are available.</div>'
-        else:
-            if selected_id == "random":
-                selected = random.choice(inspectors)
-            else:
-                selected = conn.execute("SELECT id,name,unique_id FROM users WHERE id=? AND role='Inspector'", (selected_id,)).fetchone()
-                if not selected:
-                    message = '<div class="info danger">Invalid Inspector selection.</div>'
-            if selected and not message:
-                conn.execute("INSERT INTO assignments(inspector_id,project_id,location,instructions,assigned_at,status,face_verified) VALUES(?,?,?,?,?,?,0)", (selected["id"], int(project_id) if project_id.isdigit() else None, location, instructions, now(), "Assigned"))
-                conn.commit()
-                message = f'<div class="info success">🎲 Inspection assigned to <b>{esc(selected["name"])}</b> ({esc(selected["unique_id"])}). Worker/Project Staff accounts are not included in PMU inspection assignment.</div>'
-
-    rows = conn.execute("""
-        SELECT a.*,u.name inspector_name,u.unique_id, p.name project_name
-        FROM assignments a JOIN users u ON a.inspector_id=u.id
-        LEFT JOIN projects p ON a.project_id=p.id
-        ORDER BY a.id DESC
-    """).fetchall()
-    conn.close()
-    inspector_options = '<option value="random">🎲 Randomly select Inspector</option>' + "".join(f'<option value="{r["id"]}">{esc(r["name"])} ({esc(r["unique_id"])})</option>' for r in inspectors)
-    trs = "".join(f'<tr><td>🔍 Inspection</td><td>{esc(r["project_name"] or "-")}</td><td>{esc(r["location"])}</td><td>{esc(r["inspector_name"])}</td><td>{esc(r["unique_id"])}</td><td>{badge(r["status"],"status")}</td><td>{esc(r["assigned_at"])}</td></tr>' for r in rows)
-    body = f'''<div class="card"><h1>🎲 Random PMU Inspection Assignment</h1><p style="color:#64748b">This module assigns <b>inspection duties only to PMU/Inspection Team (Inspector) accounts</b>. Project Staff are handled separately under Work Assignments.</p>{message}<form method="POST" class="form-grid"><div class="field"><label>Project / Institute / NGO</label><select name="project_id"><option value="">-- Select project --</option>{''.join(f'<option value="{p["id"]}">{esc(p["name"])} — {esc(p["location"])}</option>' for p in projects_rows)}</select></div><div class="field"><label>Inspector</label><select name="inspector_id" required>{inspector_options}</select></div><div class="field"><label>Location (used if no project selected)</label><input name="location" placeholder="District / Institute location"></div><div class="field"><label>Inspection Instructions</label><input name="instructions" placeholder="Check facilities, attendance, records..."></div><div class="full"><button class="btn btn-purple">🎲 Assign Inspection</button></div></form></div><div class="card"><h2>📋 Inspection Assignment History</h2><div class="table-wrap"><table><tr><th>Type</th><th>Project</th><th>Location</th><th>Assigned Inspector</th><th>ID</th><th>Status</th><th>Assigned</th></tr>{trs or '<tr><td colspan="7" class="empty">No inspection assignments yet.</td></tr>'}</table></div></div>'''
-    return page(body, "Inspection Assignments")
-
-
-@app.route("/my-inspections")
-def my_inspections():
-    if not role_required("Inspector"):
-        return "Access denied", 403
-    conn = db()
-    rows = conn.execute("SELECT a.*,p.name project_name FROM assignments a LEFT JOIN projects p ON a.project_id=p.id WHERE a.inspector_id=? ORDER BY a.id DESC", (session["user_id"],)).fetchall()
-    conn.close()
-    trs = ""
-    for r in rows:
-        if r["status"] == "Completed":
-            action = '<span class="badge low">✅ Completed</span>'
-        elif r["face_verified"]:
-            action = f'<a class="btn btn-green" href="/inspection/{r["id"]}">📋 Start Inspection</a>'
-        else:
-            action = f'<a class="btn btn-purple" href="/face-verification/{r["id"]}">📷 Verify Identity</a>'
-        verification = '<span class="badge low">✅ Verified</span>' if r["face_verified"] else '<span class="badge medium">⏳ Required</span>'
-        trs += f'<tr><td>🔍 Inspection</td><td>{esc(r["project_name"] or "-")}</td><td>📍 {esc(r["location"])}</td><td>{verification}</td><td>{badge(r["status"],"status")}</td><td>{esc(r["assigned_at"])}</td><td>{action}</td></tr>'
-    body = f'''<div class="card"><div class="section-title"><h1>📋 My Inspection Assignments</h1><span class="role">PMU / Inspection Team</span></div><div class="info">Only inspection assignments belonging to your Inspector account are shown here. Project Staff assignments never appear on this page.</div><div class="table-wrap"><table><tr><th>Type</th><th>Project</th><th>Location</th><th>Identity</th><th>Status</th><th>Assigned</th><th>Action</th></tr>{trs or '<tr><td colspan="7" class="empty">📭 No inspection assignments available.</td></tr>'}</table></div></div>'''
-    return page(body, "My Inspections")
-
-
-@app.route("/face-verification/<int:assignment_id>", methods=["GET", "POST"])
-def face_verification(assignment_id):
-    if not role_required("Inspector"):
-        return "Access denied", 403
-    conn = db()
-    assignment = conn.execute("SELECT * FROM assignments WHERE id=? AND inspector_id=? AND status='Assigned'", (assignment_id, session["user_id"])).fetchone()
-    if not assignment:
-        conn.close()
-        return "Invalid assignment", 403
-    if request.method == "POST":
-        photo = request.files.get("face_photo")
-        if not photo or not photo.filename:
-            conn.close()
-            return "Please capture your face photo.", 400
-        if not allowed_file(photo.filename):
-            conn.close()
-            return "Invalid image format.", 400
-        filename = "face_" + str(session["user_id"]) + "_" + uuid.uuid4().hex + ".jpg"
-        photo.save(os.path.join(FACE_FOLDER, filename))
-        conn.execute("UPDATE assignments SET face_verified=1 WHERE id=? AND inspector_id=?", (assignment_id, session["user_id"]))
-        conn.commit()
-        conn.close()
-        return redirect(url_for("inspection", assignment_id=assignment_id))
-    conn.close()
-    body = f'''<div class="card" style="max-width:700px;margin:auto"><h1>📷 Inspector Identity Verification</h1><div class="info">Assigned location: <b>{esc(assignment["location"])}</b><br>This prototype records a camera capture as an identity-verification step. It does not perform biometric face matching.</div><div class="video-box"><video id="video" class="camera" autoplay playsinline></video></div><canvas id="canvas" hidden></canvas><form id="faceForm" method="POST" enctype="multipart/form-data"><input id="face_photo" name="face_photo" type="file" accept="image/*" hidden><button type="button" class="btn btn-purple" onclick="captureFace()">📸 Capture & Verify</button></form><p id="message" class="error"></p></div><script>
-const video=document.getElementById('video');
-if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){{navigator.mediaDevices.getUserMedia({{video:true}}).then(stream=>{{video.srcObject=stream;}}).catch(()=>{{document.getElementById('message').textContent='❌ Camera access denied. Please allow camera permission.';}});}}else{{document.getElementById('message').textContent='❌ Camera is not supported by this browser.';}}
-function captureFace(){{if(!video.videoWidth){{alert('Please wait for the camera to start.');return;}}const canvas=document.getElementById('canvas');canvas.width=video.videoWidth;canvas.height=video.videoHeight;canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);canvas.toBlob(blob=>{{if(!blob){{alert('Could not capture image.');return;}}const file=new File([blob],'face.jpg',{{type:'image/jpeg'}});const dt=new DataTransfer();dt.items.add(file);document.getElementById('face_photo').files=dt.files;const stream=video.srcObject;if(stream)stream.getTracks().forEach(t=>t.stop());document.getElementById('faceForm').submit();}},'image/jpeg');}}
-</script>'''
-    return page(body, "Identity Verification")
-
-
-@app.route("/inspection/<int:assignment_id>", methods=["GET", "POST"])
-def inspection(assignment_id):
-    if not role_required("Inspector"):
-        return "Access denied", 403
-    conn = db()
-    assignment = conn.execute("SELECT * FROM assignments WHERE id=? AND inspector_id=? AND face_verified=1 AND status='Assigned'", (assignment_id, session["user_id"])).fetchone()
-    if not assignment:
-        conn.close()
-        return "Inspection access denied", 403
-
-    if request.method == "POST":
-        cleanliness = request.form.get("cleanliness", "Yes")
-        safety = request.form.get("safety", "Yes")
-        facilities = request.form.get("facilities", "Yes")
-        attendance_ok = request.form.get("attendance_ok", "Yes")
-        records_ok = request.form.get("records_ok", "Yes")
-        description = request.form.get("description", "").strip()
-        lat = request.form.get("latitude", "").strip()
-        lon = request.form.get("longitude", "").strip()
-        photo_name = None
-        photo = request.files.get("photo")
-
-        if photo and photo.filename:
-            if not allowed_file(photo.filename):
-                conn.close()
-                return "Invalid photo format.", 400
-            safe_name = secure_filename(photo.filename)
-            ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "jpg"
-            photo_name = uuid.uuid4().hex + "." + ext
-            photo.save(os.path.join(UPLOAD_FOLDER, photo_name))
-
-        checks = [
-            ("Cleanliness", cleanliness),
-            ("Safety", safety),
-            ("Facilities", facilities),
-            ("Attendance", attendance_ok),
-            ("Records", records_ok),
-        ]
-        detected = [label for label, answer in checks if answer == "No"]
-        if detected and not description:
-            description = "Issues detected during inspection: " + ", ".join(detected)
-
-        project_id = assignment["project_id"]
-        for issue_type in detected:
-            count_query = "SELECT COUNT(*) FROM issues WHERE LOWER(location)=LOWER(?)"
-            count = conn.execute(count_query, (assignment["location"],)).fetchone()[0] + 1
-            priority = "High" if count > 3 else "Medium" if count >= 2 else "Low"
-            conn.execute("""INSERT INTO issues(assignment_id,project_id,location,issue_type,description,created_at,status,priority,photo,reporter_id,latitude,longitude,verified)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)""", (assignment_id, project_id, assignment["location"], issue_type, description, now(), "Reported", priority, photo_name, session["user_id"], lat, lon))
-
-        conn.execute("UPDATE assignments SET status='Completed' WHERE id=? AND inspector_id=?", (assignment_id, session["user_id"]))
-        conn.commit()
-        conn.close()
-        result = "⚠️ Issues reported: " + ", ".join(detected) if detected else "✅ Inspection completed. No issues found."
-        body = f'<div class="card" style="text-align:center"><h1>✅ Inspection Submitted</h1><div class="info success">📍 {esc(assignment["location"])}<br><br>{esc(result)}</div><a class="btn" href="/my-inspections">📋 My Inspections</a><a class="btn btn-green" href="/dashboard">📊 Dashboard</a></div>'
-        return page(body, "Inspection Submitted")
-
-    conn.close()
-    body = f'''<div class="card"><h1>📋 PMU Field Inspection</h1><div class="info">📍 Location: <b>{esc(assignment["location"])}</b><br>🔐 Identity Verification: <b>Completed ✅</b><br>📝 Instructions: <b>{esc(assignment["instructions"] or "Follow the standard inspection checklist.")}</b></div><form method="POST" enctype="multipart/form-data" class="form-grid"><div class="field"><label>🧹 Is the area clean?</label><select name="cleanliness"><option>Yes</option><option>No</option></select></div><div class="field"><label>🛡️ Is the area safe?</label><select name="safety"><option>Yes</option><option>No</option></select></div><div class="field"><label>🏢 Are facilities working?</label><select name="facilities"><option>Yes</option><option>No</option></select></div><div class="field"><label>👥 Is attendance satisfactory?</label><select name="attendance_ok"><option>Yes</option><option>No</option></select></div><div class="field"><label>📄 Are records available/correct?</label><select name="records_ok"><option>Yes</option><option>No</option></select></div><div class="field"><label>📸 Photo Evidence</label><input type="file" name="photo" accept="image/*"></div><div class="field"><label>Latitude</label><input id="latitude" name="latitude" placeholder="Latitude"></div><div class="field"><label>Longitude</label><input id="longitude" name="longitude" placeholder="Longitude"></div><div class="full"><button type="button" class="btn btn-purple" onclick="getLocation()">📍 Get Current Location</button></div><div class="field full"><label>📝 Inspection Remarks</label><textarea name="description" placeholder="Describe observations, deficiencies and evidence..."></textarea></div><div class="full"><button class="btn" type="submit">📤 Submit Inspection Report</button></div></form></div><script>
-function getLocation(){{if(!navigator.geolocation){{alert('Geolocation is not supported by this browser.');return;}}navigator.geolocation.getCurrentPosition(position=>{{document.getElementById('latitude').value=position.coords.latitude;document.getElementById('longitude').value=position.coords.longitude;}},()=>alert('Please allow location permission.'));}}
-</script>'''
-    return page(body, "Field Inspection")
-
-
-@app.route("/my-work", methods=["GET", "POST"])
-def my_work():
-    if not role_required("Project Staff"):
-        return "Access denied", 403
-    conn = db()
-    message = ""
-    if request.method == "POST":
-        work_id = request.form.get("work_id", "").strip()
-        action = request.form.get("action", "")
-        work = conn.execute("SELECT * FROM work_assignments WHERE id=? AND staff_id=?", (work_id, session["user_id"])).fetchone()
-        if not work:
-            message = '<div class="info danger">Invalid work assignment.</div>'
-        elif action == "accept" and work["status"] == "Assigned":
-            conn.execute("UPDATE work_assignments SET status='Accepted' WHERE id=?", (work_id,))
-            conn.commit()
-            message = '<div class="info success">✅ Work accepted.</div>'
-        elif action == "complete" and work["status"] in ("Assigned", "Accepted"):
-            photo = request.files.get("evidence_photo")
-            photo_name = None
-            if photo and photo.filename:
-                if not allowed_file(photo.filename):
-                    conn.close()
-                    return "Invalid image format.", 400
-                safe_name = secure_filename(photo.filename)
-                ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "jpg"
-                photo_name = uuid.uuid4().hex + "." + ext
-                photo.save(os.path.join(UPLOAD_FOLDER, photo_name))
-            lat = request.form.get("latitude", "").strip()
-            lon = request.form.get("longitude", "").strip()
-            conn.execute("UPDATE work_assignments SET status='Completed',evidence_photo=?,latitude=?,longitude=?,completed_at=? WHERE id=?", (photo_name, lat, lon, now(), work_id))
-            conn.commit()
-            message = '<div class="info success">✅ Work completed and evidence submitted.</div>'
-    rows = conn.execute("SELECT w.*,p.name project_name FROM work_assignments w LEFT JOIN projects p ON w.project_id=p.id WHERE w.staff_id=? ORDER BY w.id DESC", (session["user_id"],)).fetchall()
-    conn.close()
-    cards = ""
-    for r in rows:
-        if r["status"] == "Completed":
-            action = '<span class="badge low">✅ Completed</span>'
-        else:
-            action = f'''<form method="POST" enctype="multipart/form-data" style="margin-top:10px"><input type="hidden" name="work_id" value="{r["id"]}"><div class="field"><label>Evidence photo (optional)</label><input type="file" name="evidence_photo" accept="image/*"></div><div class="form-grid"><div class="field"><label>Latitude</label><input name="latitude"></div><div class="field"><label>Longitude</label><input name="longitude"></div></div>{('<button class="btn btn-light" name="action" value="accept">Accept Work</button>' if r["status"] == "Assigned" else '')}<button class="btn btn-green" name="action" value="complete">Complete Work</button></form>'''
-        photo = f'<img class="evidence" src="/uploads/{esc(r["evidence_photo"])}">' if r["evidence_photo"] else ''
-        cards += f'''<div class="feature"><span class="badge purple">🛠️ Project Staff Work</span><h3>{esc(r["title"])}</h3><p><b>Project:</b> {esc(r["project_name"] or "-")}<br><b>Location:</b> {esc(r["location"])}<br><b>Instructions:</b> {esc(r["instructions"] or "-")}<br><b>Status:</b> {badge(r["status"],"status")}</p>{photo}{action}</div>'''
-    body = f'''<div class="card"><div class="section-title"><h1>🛠️ My Work Assignments</h1><span class="role">Project / Institute Staff</span></div><div class="info">This is a separate work area for Project Staff. These assignments are <b>not</b> PMU inspection assignments and never appear in the Inspector's inspection list.</div>{message}<div class="grid">{cards or '<div class="empty">📭 No work assignments available.</div>'}</div></div>'''
-    return page(body, "My Work")
-
-
-@app.route("/staff-assignments", methods=["POST"])
-def staff_assignments():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    staff_id = request.form.get("staff_id", "").strip()
-    project_id = request.form.get("project_id", "").strip()
-    title = request.form.get("title", "").strip()
-    location = request.form.get("location", "").strip()
-    instructions = request.form.get("instructions", "").strip()
-    if not staff_id or not title or not location:
-        return redirect(url_for("assignments") + "#staff-work")
-    conn = db()
-    staff = conn.execute("SELECT id FROM users WHERE id=? AND role='Project Staff'", (staff_id,)).fetchone()
-    if not staff:
-        conn.close()
-        return "Invalid Project Staff account", 400
-    conn.execute("INSERT INTO work_assignments(staff_id,project_id,title,location,instructions,assigned_at,status) VALUES(?,?,?,?,?,?,?)", (staff_id, int(project_id) if project_id.isdigit() else None, title, location, instructions, now(), "Assigned"))
-    conn.commit()
-    conn.close()
-    return redirect(url_for("assignments") + "#staff-work")
-
-
-@app.route("/beneficiary")
-def beneficiary():
-    if not role_required("Beneficiary"):
-        return "Access denied", 403
-    conn = db()
-    projects_rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
-    conn.close()
-    rows = "".join(f'<tr><td>{esc(p["name"])}</td><td>{esc(p["project_type"])}</td><td>{esc(p["location"])}</td><td>{esc(p["contact_name"] or "Project Incharge")}</td></tr>' for p in projects_rows)
-    body = f'''<div class="card"><h1>🙋 Beneficiary Workspace</h1><div class="info">This prototype provides a simple beneficiary-side view for project/service information and random VC coordination.</div><h2>Available Projects / Institutes</h2><div class="table-wrap"><table><tr><th>Project</th><th>Scheme</th><th>Location</th><th>Contact</th></tr>{rows or '<tr><td colspan="4" class="empty">No project information available.</td></tr>'}</table></div><a class="btn btn-purple" href="/meetings">🎥 View Available VC Meetings</a></div>'''
-    return page(body, "Beneficiary")
-
-
-@app.route("/assignments-staff-form")
-def assignments_staff_form():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    conn = db()
-    staff = conn.execute("SELECT id,name,unique_id FROM users WHERE role='Project Staff' ORDER BY name").fetchall()
-    projects_rows = conn.execute("SELECT id,name,location FROM projects ORDER BY name").fetchall()
-    conn.close()
-    staff_options = "".join(f'<option value="{s["id"]}">{esc(s["name"])} ({esc(s["unique_id"])})</option>' for s in staff)
-    project_options = '<option value="">-- Optional --</option>' + "".join(f'<option value="{p["id"]}">{esc(p["name"])} — {esc(p["location"])}</option>' for p in projects_rows)
-    body = f'''<div class="card"><h1>🛠️ Assign Project Staff Work</h1><div class="info">This is intentionally separate from PMU Inspection Assignment. Authority can assign project-side operational/support work to Project Staff.</div><form method="POST" action="/staff-assignments" class="form-grid"><div class="field"><label>Project Staff</label><select name="staff_id" required>{staff_options or '<option value="">No Project Staff accounts</option>'}</select></div><div class="field"><label>Project</label><select name="project_id">{project_options}</select></div><div class="field"><label>Work Title</label><input name="title" placeholder="Update beneficiary attendance records" required></div><div class="field"><label>Location</label><input name="location" required></div><div class="field full"><label>Instructions</label><textarea name="instructions"></textarea></div><div class="full"><button class="btn btn-green">🛠️ Assign Staff Work</button></div></form></div>'''
-    return page(body, "Assign Staff Work")
-
+# ============================================================
+# DASHBOARD
+# ============================================================
 
 @app.route("/dashboard")
+@login_required
 def dashboard():
-    if not logged_in():
-        return redirect(url_for("login"))
-    conn = db()
-    query = "SELECT i.*,u.name reporter_name,p.name project_name FROM issues i LEFT JOIN users u ON i.reporter_id=u.id LEFT JOIN projects p ON i.project_id=p.id"
-    params = ()
-    if session["role"] == "Inspector":
-        query += " WHERE i.reporter_id=?"
-        params = (session["user_id"],)
-    elif session["role"] != "Authority":
+
+    conn = get_db()
+
+    projects = conn.execute(
+        "SELECT COUNT(*) FROM projects"
+    ).fetchone()[0]
+
+    inspections = conn.execute(
+        "SELECT COUNT(*) FROM inspections"
+    ).fetchone()[0]
+
+    issues_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM issues
+        WHERE status != 'Resolved'
+    """).fetchone()[0]
+
+    attendance_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM attendance
+        WHERE attendance_date=?
+    """, (
+        datetime.now().strftime("%Y-%m-%d"),
+    )).fetchone()[0]
+
+    recent = conn.execute("""
+        SELECT i.*, p.name project_name
+        FROM inspections i
+        LEFT JOIN projects p ON i.project_id=p.id
+        ORDER BY i.id DESC
+        LIMIT 5
+    """).fetchall()
+
+    conn.close()
+
+    rows = "".join(
+        f"""
+        <tr>
+            <td>{r['title']}</td>
+            <td>{r['project_name'] or 'Not Assigned'}</td>
+            <td>{r['status']}</td>
+        </tr>
+        """
+        for r in recent
+    )
+
+    return page("Dashboard", f"""
+
+    <h1>📊 Real-Time Monitoring Dashboard</h1>
+
+    <div class="grid">
+
+        <div class="stat">
+            <h2>{projects}</h2>
+            🏢 Projects / Institutes
+        </div>
+
+        <div class="stat">
+            <h2>{inspections}</h2>
+            📋 Total Inspections
+        </div>
+
+        <div class="stat">
+            <h2>{issues_count}</h2>
+            ⚠️ Open Issues
+        </div>
+
+        <div class="stat">
+            <h2>{attendance_count}</h2>
+            👥 Today's Attendance
+        </div>
+
+    </div>
+
+    <div class="card">
+
+        <h2>Recent Inspection Activity</h2>
+
+        <table>
+            <tr>
+                <th>Inspection</th>
+                <th>Project</th>
+                <th>Status</th>
+            </tr>
+
+            {rows or "<tr><td colspan='3'>No inspections yet.</td></tr>"}
+
+        </table>
+
+    </div>
+    """)
+
+
+# ============================================================
+# PROJECT MANAGEMENT
+# ============================================================
+
+@app.route("/projects", methods=["GET", "POST"])
+@login_required
+def projects():
+
+    conn = get_db()
+
+    if request.method == "POST":
+
+        if session["role"] not in ["admin", "official"]:
+            conn.close()
+            return "Only authorized officials can add projects.", 403
+
+        conn.execute("""
+            INSERT INTO projects(
+                name, location, incharge,
+                cctv_url, status, created_at
+            )
+            VALUES(?,?,?,?,?,?)
+        """, (
+            request.form["name"],
+            request.form.get("location"),
+            request.form.get("incharge"),
+            request.form.get("cctv_url"),
+            "Active",
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ))
+
+        conn.commit()
+
+    projects_list = conn.execute(
+        "SELECT * FROM projects"
+    ).fetchall()
+
+    conn.close()
+
+    form = ""
+
+    if session["role"] in ["admin", "official"]:
+
+        form = """
+        <div class="card">
+
+            <h2>➕ Add Project / Institute</h2>
+
+            <form method="POST">
+
+                <input name="name"
+                       placeholder="Project / Institute Name"
+                       required>
+
+                <input name="location"
+                       placeholder="Location">
+
+                <input name="incharge"
+                       placeholder="Project Incharge">
+
+                <input name="cctv_url"
+                       placeholder="CCTV / Monitoring URL">
+
+                <button>Add Project</button>
+
+            </form>
+
+        </div>
+        """
+
+    rows = ""
+
+    for p in projects_list:
+
+        cctv = "Not Connected"
+
+        if p["cctv_url"]:
+            cctv = f"""
+            <a class='btn'
+               href='{p["cctv_url"]}'
+               target='_blank'>
+               📹 Open CCTV
+            </a>
+            """
+
+        rows += f"""
+        <tr>
+            <td>{p['name']}</td>
+            <td>{p['location'] or '-'}</td>
+            <td>{p['incharge'] or '-'}</td>
+            <td>{p['status']}</td>
+            <td>{cctv}</td>
+        </tr>
+        """
+
+    return page("Projects", f"""
+
+    <h1>🏢 Project & Institute Management</h1>
+
+    {form}
+
+    <div class="card">
+
+        <table>
+
+            <tr>
+                <th>Name</th>
+                <th>Location</th>
+                <th>Incharge</th>
+                <th>Status</th>
+                <th>CCTV</th>
+            </tr>
+
+            {rows or "<tr><td colspan='5'>No projects available.</td></tr>"}
+
+        </table>
+
+    </div>
+    """)
+
+
+# ============================================================
+# RANDOM INSPECTOR ASSIGNMENT
+# ============================================================
+
+@app.route("/assign-inspector", methods=["POST"])
+@role_required("admin", "official")
+def assign_inspector():
+
+    project_id = request.form["project_id"]
+    title = request.form.get("title", "Surprise Inspection")
+
+    conn = get_db()
+
+    inspectors = conn.execute("""
+        SELECT *
+        FROM users
+        WHERE role IN ('inspector', 'official')
+    """).fetchall()
+
+    if not inspectors:
         conn.close()
-        return "Access denied", 403
-    query += " ORDER BY i.id DESC"
-    issues = conn.execute(query, params).fetchall()
-    counts = conn.execute("SELECT COUNT(*) total, SUM(status='Reported') reported, SUM(status='In Progress') progress, SUM(status='Resolved') resolved, SUM(priority='High') high FROM issues").fetchone()
-    assignment_count = conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
+        return (
+            "No inspectors available. "
+            "An administrator must assign Inspector roles.",
+            400
+        )
+
+    inspector = random.choice(inspectors)
+
+    # CORRECTED: 4 values for 4 columns
+    conn.execute("""
+        INSERT INTO inspections(
+            project_id,
+            inspector_id,
+            title,
+            created_at
+        )
+        VALUES(?,?,?,?)
+    """, (
+        project_id,
+        inspector["id"],
+        title,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    ))
+
+    conn.commit()
     conn.close()
-    total = counts["total"] or 0
-    reported = counts["reported"] or 0
-    progress = counts["progress"] or 0
-    resolved = counts["resolved"] or 0
-    high = counts["high"] or 0
-    trs = ""
-    for i in issues:
-        photo = f'<a href="/uploads/{esc(i["photo"])}" target="_blank"><img class="evidence" src="/uploads/{esc(i["photo"])}"></a>' if i["photo"] else "—"
-        loc = esc(i["location"])
-        if i["latitude"] and i["longitude"]:
-            loc += f'<br><small>📍 {esc(i["latitude"])}, {esc(i["longitude"])}</small>'
-        if session["role"] == "Authority":
-            verify = "" if i["verified"] else f'<a class="btn btn-purple" href="/verify/{i["id"]}">🔍 Verify</a>'
-            if i["status"] == "Reported":
-                status_action = f'<a class="btn btn-orange" href="/update/{i["id"]}/In%20Progress">🟡 Start</a>'
-            elif i["status"] == "In Progress":
-                status_action = f'<a class="btn btn-green" href="/update/{i["id"]}/Resolved">✅ Resolve</a>'
-            else:
-                status_action = "✅ Resolved"
-            action = verify + " " + status_action
+
+    notify(
+        inspector["id"],
+        f"🎲 New inspection assigned: {title}. "
+        f"Face verification is required before submission."
+    )
+
+    return redirect(url_for("inspections"))
+
+
+# ============================================================
+# INSPECTIONS
+# ============================================================
+
+@app.route("/inspections", methods=["GET", "POST"])
+@login_required
+def inspections():
+
+    conn = get_db()
+
+    if request.method == "POST":
+
+        inspection_id = request.form.get("inspection_id")
+
+        # Verify inspection ownership
+        inspection = conn.execute("""
+            SELECT *
+            FROM inspections
+            WHERE id=?
+        """, (inspection_id,)).fetchone()
+
+        if not inspection:
+            conn.close()
+            return "Inspection not found.", 404
+
+        if (
+            session["role"] == "inspector" and
+            inspection["inspector_id"] != session["user_id"]
+        ):
+            conn.close()
+            return "You are not authorized for this inspection.", 403
+
+        # FACE VERIFICATION
+        face_data = request.form.get("verification_face")
+
+        verified, message = verify_user_face(
+            session["user_id"],
+            face_data
+        )
+
+        if not verified:
+            conn.close()
+            return page(
+                "Face Verification Failed",
+                f"""
+                <div class="login card">
+                    <h2>❌ Identity Verification Failed</h2>
+                    <p class="danger">{message}</p>
+                    <a class="btn"
+                       href="/inspection-form/{inspection_id}">
+                       Try Again
+                    </a>
+                </div>
+                """
+            )
+
+        latitude = request.form.get("latitude")
+        longitude = request.form.get("longitude")
+
+        checklist_items = request.form.getlist("checklist")
+        checklist = ", ".join(checklist_items)
+
+        evidence = save_file(
+            request.files.get("evidence")
+        )
+
+        conn.execute("""
+            UPDATE inspections
+            SET
+                status='Completed',
+                latitude=?,
+                longitude=?,
+                checklist=?,
+                evidence=?,
+                remarks=?
+            WHERE id=?
+        """, (
+            latitude,
+            longitude,
+            checklist,
+            evidence,
+            request.form.get("remarks"),
+            inspection_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+        notify(
+            session["user_id"],
+            "✅ Inspection submitted successfully and identity verified."
+        )
+
+        return redirect(url_for("inspections"))
+
+    projects_list = conn.execute(
+        "SELECT * FROM projects"
+    ).fetchall()
+
+    if session["role"] == "inspector":
+
+        inspections_list = conn.execute("""
+            SELECT i.*, p.name project_name,
+                   u.name inspector_name
+            FROM inspections i
+            LEFT JOIN projects p ON i.project_id=p.id
+            LEFT JOIN users u ON i.inspector_id=u.id
+            WHERE i.inspector_id=?
+            ORDER BY i.id DESC
+        """, (
+            session["user_id"],
+        )).fetchall()
+
+    else:
+
+        inspections_list = conn.execute("""
+            SELECT i.*, p.name project_name,
+                   u.name inspector_name
+            FROM inspections i
+            LEFT JOIN projects p ON i.project_id=p.id
+            LEFT JOIN users u ON i.inspector_id=u.id
+            ORDER BY i.id DESC
+        """).fetchall()
+
+    conn.close()
+
+    assignment_form = ""
+
+    if session["role"] in ["admin", "official"]:
+
+        project_options = "".join(
+            f"<option value='{p['id']}'>{p['name']}</option>"
+            for p in projects_list
+        )
+
+        assignment_form = f"""
+        <div class="card">
+
+            <h2>🎲 Random Inspector Assignment</h2>
+
+            <form method="POST"
+                  action="/assign-inspector">
+
+                <input name="title"
+                       placeholder="Inspection Title"
+                       required>
+
+                <select name="project_id">
+                    {project_options}
+                </select>
+
+                <button>
+                    Randomly Assign Inspector 🎲
+                </button>
+
+            </form>
+
+        </div>
+        """
+
+    cards = ""
+
+    for i in inspections_list:
+
+        if i["status"] == "Completed":
+
+            cards += f"""
+            <div class="card">
+
+                <h3>📋 {i['title']}</h3>
+
+                <p><b>Project:</b>
+                    {i['project_name'] or '-'}
+                </p>
+
+                <p><b>Inspector:</b>
+                    {i['inspector_name'] or '-'}
+                </p>
+
+                <p class="success">
+                    ✅ Completed & Identity Verified
+                </p>
+
+                <p>
+                    <b>GPS:</b>
+                    {i['latitude'] or '-'},
+                    {i['longitude'] or '-'}
+                </p>
+
+                <p>
+                    <b>Checklist:</b>
+                    {i['checklist'] or '-'}
+                </p>
+
+            </div>
+            """
+
         else:
-            action = "🔒 View Only"
-        trs += f'<tr><td>{esc(i["project_name"] or "-")}</td><td>{loc}</td><td>{esc(i["issue_type"])}</td><td>{esc(i["description"] or "-")}</td><td>{badge(i["priority"])}</td><td>{photo}</td><td>{badge(i["status"],"status")}</td><td>{esc(i["created_at"])}</td><td>{action}</td></tr>'
-    body = f'''<div class="section-title"><div><h1>📊 Real-Time Monitoring Dashboard</h1><p style="color:#64748b">Central monitoring of PMU inspection findings and corrective status.</p></div><span class="role">DoSJE Monitoring</span></div><div class="stats"><div class="stat"><div class="num">{total}</div><small>Total Issues</small></div><div class="stat"><div class="num">{reported}</div><small>🔴 Reported</small></div><div class="stat"><div class="num">{progress}</div><small>🟡 In Progress</small></div><div class="stat"><div class="num">{resolved}</div><small>🟢 Resolved</small></div><div class="stat"><div class="num">{high}</div><small>🔴 High Priority</small></div><div class="stat"><div class="num">{assignment_count}</div><small>🎲 Inspections Assigned</small></div></div><div class="card"><h2>🚨 Inspection Reports</h2><div class="table-wrap"><table><tr><th>Project</th><th>Location + GPS</th><th>Issue</th><th>Description</th><th>Priority</th><th>Evidence</th><th>Status</th><th>Time</th><th>Action</th></tr>{trs or '<tr><td colspan="9" class="empty">🎉 No inspection issues found.</td></tr>'}</table></div></div>'''
-    return page(body, "Monitoring Dashboard")
+
+            can_start = (
+                session["role"] != "inspector" or
+                i["inspector_id"] == session["user_id"]
+            )
+
+            button = ""
+
+            if can_start:
+                button = f"""
+                <a class="btn"
+                   href="/inspection-form/{i['id']}">
+                   🔐 Verify Face & Start Inspection
+                </a>
+                """
+
+            cards += f"""
+            <div class="card">
+
+                <h3>📋 {i['title']}</h3>
+
+                <p>
+                    <b>Project:</b>
+                    {i['project_name'] or '-'}
+                </p>
+
+                <p>
+                    <b>Inspector:</b>
+                    {i['inspector_name'] or 'Not assigned'}
+                </p>
+
+                <p><b>Status:</b> {i['status']}</p>
+
+                {button}
+
+            </div>
+            """
+
+    return page("Inspections", f"""
+
+    <h1>📋 Digital Inspection Module</h1>
+
+    {assignment_form}
+
+    {cards or "<div class='card'>No inspections available.</div>"}
+    """)
 
 
-@app.route("/verify/<int:issue_id>")
-def verify_issue(issue_id):
-    if not role_required("Authority"):
-        return "Access denied", 403
-    conn = db()
-    conn.execute("UPDATE issues SET verified=1 WHERE id=?", (issue_id,))
-    conn.commit()
+# ============================================================
+# INSPECTION FORM + FACE + GPS + CAMERA
+# ============================================================
+
+@app.route("/inspection-form/<int:inspection_id>")
+@login_required
+def inspection_form(inspection_id):
+
+    conn = get_db()
+
+    inspection = conn.execute("""
+        SELECT *
+        FROM inspections
+        WHERE id=?
+    """, (inspection_id,)).fetchone()
+
     conn.close()
-    return redirect(url_for("dashboard"))
+
+    if not inspection:
+        return "Inspection not found.", 404
+
+    if (
+        session["role"] == "inspector" and
+        inspection["inspector_id"] != session["user_id"]
+    ):
+        return "Access denied.", 403
+
+    return page("Inspection Form", f"""
+
+    <div class="card">
+
+        <h1>📋 Smart Inspection Form</h1>
+
+        <p class="warning">
+            🔐 For security, your face will be verified before
+            the inspection report can be submitted.
+        </p>
+
+        <form method="POST"
+              action="/inspections"
+              enctype="multipart/form-data">
+
+            <input type="hidden"
+                   name="inspection_id"
+                   value="{inspection_id}">
+
+            <input type="hidden"
+                   name="latitude"
+                   id="latitude">
+
+            <input type="hidden"
+                   name="longitude"
+                   id="longitude">
+
+            <input type="hidden"
+                   name="verification_face"
+                   id="verification_face">
+
+            <h3>🔐 Face Verification</h3>
+
+            <video id="video"
+                   autoplay
+                   playsinline>
+            </video>
+
+            <canvas id="canvas"
+                    style="display:none">
+            </canvas>
+
+            <br>
+
+            <button type="button"
+                    onclick="startCamera()">
+                📷 Start Camera
+            </button>
+
+            <button type="button"
+                    onclick="captureVerification()">
+                🔐 Capture for Verification
+            </button>
+
+            <p id="faceStatus"></p>
 
 
-@app.route("/update/<int:issue_id>/<status>")
-def update_status(issue_id, status):
-    if not role_required("Authority"):
-        return "Access denied", 403
-    if status not in ("Reported", "In Progress", "Resolved"):
-        return "Invalid status", 400
-    conn = db()
-    conn.execute("UPDATE issues SET status=? WHERE id=?", (status, issue_id))
-    conn.commit()
+            <h3>📍 Geo Location</h3>
+
+            <button type="button"
+                    onclick="getLocation()">
+                Capture Current Location
+            </button>
+
+            <p id="locationStatus"></p>
+
+
+            <h3>📋 Inspection Checklist</h3>
+
+            <label>
+                <input type="checkbox"
+                       name="checklist"
+                       value="Infrastructure Verified">
+                Infrastructure Verified
+            </label><br>
+
+            <label>
+                <input type="checkbox"
+                       name="checklist"
+                       value="Staff Available">
+                Staff Available
+            </label><br>
+
+            <label>
+                <input type="checkbox"
+                       name="checklist"
+                       value="Beneficiary Services Verified">
+                Beneficiary Services Verified
+            </label><br>
+
+            <label>
+                <input type="checkbox"
+                       name="checklist"
+                       value="Records Verified">
+                Records Verified
+            </label><br>
+
+            <label>
+                <input type="checkbox"
+                       name="checklist"
+                       value="Attendance Verified">
+                Attendance Verified
+            </label>
+
+
+            <h3>📸 Photo Evidence Upload</h3>
+
+            <input type="file"
+                   name="evidence"
+                   accept="image/*">
+
+
+            <h3>📝 Remarks</h3>
+
+            <textarea name="remarks"
+                      placeholder="Enter inspection observations">
+            </textarea>
+
+            <button type="submit">
+                Submit Verified Inspection Report
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <script>
+
+    async function startCamera() {{
+
+        try {{
+
+            const stream =
+                await navigator.mediaDevices.getUserMedia({{
+                    video: {{ facingMode: "user" }}
+                }});
+
+            document.getElementById("video").srcObject =
+                stream;
+
+        }} catch(error) {{
+
+            document.getElementById("faceStatus").innerHTML =
+                "⚠️ Camera permission is required.";
+
+        }}
+    }}
+
+
+    function captureVerification() {{
+
+        const video =
+            document.getElementById("video");
+
+        const canvas =
+            document.getElementById("canvas");
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context = canvas.getContext("2d");
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        document.getElementById("verification_face").value =
+            canvas.toDataURL("image/jpeg");
+
+        document.getElementById("faceStatus").innerHTML =
+            "✅ Face captured. It will be verified when you submit.";
+
+    }}
+
+
+    function getLocation() {{
+
+        if (navigator.geolocation) {{
+
+            navigator.geolocation.getCurrentPosition(
+
+                function(position) {{
+
+                    document.getElementById("latitude").value =
+                        position.coords.latitude;
+
+                    document.getElementById("longitude").value =
+                        position.coords.longitude;
+
+                    document.getElementById("locationStatus").innerHTML =
+                        "✅ GPS Location Captured Successfully";
+
+                }},
+
+                function() {{
+
+                    document.getElementById("locationStatus").innerHTML =
+                        "⚠️ Unable to capture location";
+
+                }}
+            );
+        }}
+    }}
+
+    </script>
+    """)
+
+
+# ============================================================
+# STAFF / WORKER ISSUE REPORT
+# ============================================================
+
+@app.route("/staff-report", methods=["GET", "POST"])
+@login_required
+def staff_report():
+
+    if request.method == "POST":
+
+        title = request.form["title"]
+        description = request.form["description"]
+        severity = request.form["severity"]
+
+        conn = get_db()
+
+        conn.execute("""
+            INSERT INTO issues(
+                title, description, severity,
+                status, created_at
+            )
+            VALUES(?,?,?,?,?)
+        """, (
+            title,
+            description,
+            severity,
+            "Open",
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ))
+
+        conn.commit()
+
+        admins = conn.execute("""
+            SELECT id FROM users
+            WHERE role IN ('admin', 'official')
+        """).fetchall()
+
+        conn.close()
+
+        for admin in admins:
+            notify(
+                admin["id"],
+                f"⚠️ New staff issue reported: {title}"
+            )
+
+        return redirect(url_for("issues"))
+
+    return page("Staff Report", """
+    <div class="card">
+
+        <h1>🛠️ Project Staff Work & Issue Report</h1>
+
+        <p>
+            Workers and project staff can report
+            problems directly from the field.
+        </p>
+
+        <form method="POST">
+
+            <input name="title"
+                   placeholder="Issue Title"
+                   required>
+
+            <select name="severity">
+                <option>Low</option>
+                <option selected>Medium</option>
+                <option>High</option>
+                <option>Critical</option>
+            </select>
+
+            <textarea name="description"
+                      placeholder="Describe the issue or field observation"
+                      required>
+            </textarea>
+
+            <button>Submit Report</button>
+
+        </form>
+
+    </div>
+    """)
+
+
+# ============================================================
+# ISSUE VERIFICATION & RESOLUTION
+# ============================================================
+
+@app.route("/issues", methods=["GET", "POST"])
+@login_required
+def issues():
+
+    conn = get_db()
+
+    if (
+        request.method == "POST" and
+        session["role"] in ["admin", "official", "inspector"]
+    ):
+
+        issue_id = request.form["issue_id"]
+        resolution = request.form["resolution"]
+
+        conn.execute("""
+            UPDATE issues
+            SET status='Resolved',
+                resolution=?
+            WHERE id=?
+        """, (
+            resolution,
+            issue_id
+        ))
+
+        conn.commit()
+
+    issues_list = conn.execute("""
+        SELECT *
+        FROM issues
+        ORDER BY id DESC
+    """).fetchall()
+
     conn.close()
-    return redirect(url_for("dashboard"))
+
+    html = "<h1>⚠️ Issue Verification & Resolution</h1>"
+
+    for issue in issues_list:
+
+        action = ""
+
+        if (
+            issue["status"] != "Resolved" and
+            session["role"] in ["admin", "official", "inspector"]
+        ):
+
+            action = f"""
+            <form method="POST">
+
+                <input type="hidden"
+                       name="issue_id"
+                       value="{issue['id']}">
+
+                <input name="resolution"
+                       placeholder="Resolution details"
+                       required>
+
+                <button>Verify & Resolve</button>
+
+            </form>
+            """
+
+        html += f"""
+        <div class="card">
+
+            <h3>
+                {issue['title']} —
+                {issue['severity']}
+            </h3>
+
+            <p>{issue['description']}</p>
+
+            <p>
+                <b>Status:</b>
+                {issue['status']}
+            </p>
+
+            {action}
+
+        </div>
+        """
+
+    return page("Issues", html)
 
 
-@app.route("/analytics")
-def analytics():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    conn = db()
-    locations = conn.execute("SELECT location,COUNT(*) reports FROM issues GROUP BY location ORDER BY reports DESC").fetchall()
-    inspectors = conn.execute("""SELECT u.name,u.unique_id,COUNT(a.id) assignments,
-        SUM(CASE WHEN a.status='Completed' THEN 1 ELSE 0 END) completed
-        FROM users u LEFT JOIN assignments a ON u.id=a.inspector_id
-        WHERE u.role='Inspector' GROUP BY u.id ORDER BY assignments DESC""").fetchall()
-    attendance = conn.execute("""SELECT u.name,u.unique_id,COUNT(at.id) records,
-        SUM(CASE WHEN at.status='Present' THEN 1 ELSE 0 END) present
-        FROM users u LEFT JOIN attendance at ON u.id=at.user_id
-        WHERE u.role IN ('Project Staff','Beneficiary') GROUP BY u.id ORDER BY records DESC""").fetchall()
-    repeated = conn.execute("SELECT location,COUNT(*) count FROM issues GROUP BY location HAVING COUNT(*)>=2 ORDER BY count DESC").fetchall()
-    conn.close()
-    locrows = "".join(f'<tr><td>{esc(x["location"])}</td><td>{x["reports"]}</td><td>{badge("High" if x["reports"]>3 else "Medium" if x["reports"]>=2 else "Low")}</td></tr>' for x in locations) or '<tr><td colspan="3" class="empty">No issue data.</td></tr>'
-    irows = "".join(f'<tr><td>{esc(x["name"])}</td><td>{esc(x["unique_id"])}</td><td>{x["assignments"] or 0}</td><td>{x["completed"] or 0}</td></tr>' for x in inspectors) or '<tr><td colspan="4" class="empty">No Inspector data.</td></tr>'
-    arows = "".join(f'<tr><td>{esc(x["name"])}</td><td>{esc(x["unique_id"])}</td><td>{x["records"] or 0}</td><td>{x["present"] or 0}</td></tr>' for x in attendance) or '<tr><td colspan="4" class="empty">No attendance records. Prototype analytics is ready for future attendance integration.</td></tr>'
-    anomaly_text = ", ".join(f'{esc(x["location"])} ({x["count"]} findings)' for x in repeated) or "No repeated-location anomaly detected yet."
-    body = f'''<div class="card"><h1>📈 AI/Automation Analytics Prototype</h1><div class="info">The current prototype uses explainable rule-based analytics: repeated findings at the same location increase priority, and attendance records can be summarized. This avoids claiming a trained AI model where none is installed.</div><div class="grid"><div class="feature"><div class="metric">{len(repeated)}</div><div class="mini">Repeated-location anomaly groups</div></div><div class="feature"><div class="metric">{len(inspectors)}</div><div class="mini">PMU Inspectors</div></div><div class="feature"><div class="metric">{sum((x["completed"] or 0) for x in inspectors)}</div><div class="mini">Completed inspections</div></div></div><h2>🔎 Anomaly Signal</h2><p>{anomaly_text}</p></div><div class="card"><h2>📍 Findings by Location</h2><div class="table-wrap"><table><tr><th>Location</th><th>Reports</th><th>Prototype Priority</th></tr>{locrows}</table></div></div><div class="card"><h2>🔍 PMU Inspection Activity</h2><div class="table-wrap"><table><tr><th>Inspector</th><th>ID</th><th>Assigned</th><th>Completed</th></tr>{irows}</table></div></div><div class="card"><h2>👥 Attendance Analytics</h2><div class="table-wrap"><table><tr><th>Person</th><th>ID</th><th>Records</th><th>Present</th></tr>{arows}</table></div></div>'''
-    return page(body, "Analytics")
-
+# ============================================================
+# ATTENDANCE + GPS + FACE VERIFICATION
+# ============================================================
 
 @app.route("/attendance", methods=["GET", "POST"])
+@login_required
 def attendance():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    conn = db()
-    message = ""
+
+    conn = get_db()
+
     if request.method == "POST":
-        user_id = request.form.get("user_id", "").strip()
-        project_id = request.form.get("project_id", "").strip()
-        status = request.form.get("status", "Present")
-        if not user_id.isdigit() or status not in ("Present", "Absent"):
-            message = '<div class="info warning">Select a valid person and attendance status.</div>'
-        else:
-            person = conn.execute("SELECT id FROM users WHERE id=? AND role IN ('Project Staff','Beneficiary')", (int(user_id),)).fetchone()
-            if not person:
-                message = '<div class="info danger">Attendance can only be recorded for Project Staff or Beneficiary accounts.</div>'
-            else:
-                conn.execute("INSERT INTO attendance(user_id,project_id,attendance_date,status,captured_at) VALUES(?,?,?,?,?)", (int(user_id), int(project_id) if project_id.isdigit() else None, datetime.now().strftime("%Y-%m-%d"), status, now()))
-                conn.commit()
-                message = '<div class="info success">✅ Attendance record saved.</div>'
-    people = conn.execute("SELECT id,name,unique_id,role FROM users WHERE role IN ('Project Staff','Beneficiary') ORDER BY name").fetchall()
-    projects_rows = conn.execute("SELECT id,name FROM projects ORDER BY name").fetchall()
-    rows = conn.execute("""SELECT at.*,u.name,u.unique_id,u.role,p.name project_name FROM attendance at JOIN users u ON at.user_id=u.id LEFT JOIN projects p ON at.project_id=p.id ORDER BY at.id DESC LIMIT 100""").fetchall()
+
+        face_data = request.form.get("attendance_face")
+
+        verified, message = verify_user_face(
+            session["user_id"],
+            face_data
+        )
+
+        if not verified:
+
+            conn.close()
+
+            return page(
+                "Verification Failed",
+                f"""
+                <div class="login card">
+                    <h2>❌ Attendance Not Marked</h2>
+                    <p class="danger">{message}</p>
+                    <a class="btn" href="/attendance">
+                        Try Again
+                    </a>
+                </div>
+                """
+            )
+
+        # Prevent duplicate attendance on same day
+        existing = conn.execute("""
+            SELECT id
+            FROM attendance
+            WHERE user_id=?
+            AND attendance_date=?
+        """, (
+            session["user_id"],
+            datetime.now().strftime("%Y-%m-%d")
+        )).fetchone()
+
+        if existing:
+            conn.close()
+
+            return page(
+                "Attendance",
+                """
+                <div class="login card">
+                    <h2>ℹ️ Attendance Already Marked</h2>
+                    <p>You have already marked attendance today.</p>
+                    <a class="btn" href="/dashboard">
+                        Dashboard
+                    </a>
+                </div>
+                """
+            )
+
+        photo = save_file(
+            request.files.get("photo")
+        )
+
+        conn.execute("""
+            INSERT INTO attendance(
+                user_id, project_id,
+                latitude, longitude,
+                photo, attendance_date,
+                status
+            )
+            VALUES(?,?,?,?,?,?,?)
+        """, (
+            session["user_id"],
+            request.form.get("project_id"),
+            request.form.get("latitude"),
+            request.form.get("longitude"),
+            photo,
+            datetime.now().strftime("%Y-%m-%d"),
+            "Present"
+        ))
+
+        conn.commit()
+
+        notify(
+            session["user_id"],
+            "✅ Attendance marked successfully with face verification."
+        )
+
+    projects_list = conn.execute(
+        "SELECT * FROM projects"
+    ).fetchall()
+
+    records = conn.execute("""
+        SELECT a.*, u.name user_name,
+               p.name project_name
+        FROM attendance a
+        LEFT JOIN users u ON a.user_id=u.id
+        LEFT JOIN projects p ON a.project_id=p.id
+        ORDER BY a.id DESC
+        LIMIT 20
+    """).fetchall()
+
     conn.close()
-    people_options = "".join(f'<option value="{p["id"]}">{esc(p["name"])} ({esc(p["unique_id"])}) — {esc(p["role"])}</option>' for p in people)
-    project_options = '<option value="">-- Optional project --</option>' + "".join(f'<option value="{p["id"]}">{esc(p["name"])}</option>' for p in projects_rows)
-    trs = "".join(f'<tr><td>{esc(r["name"])}</td><td>{esc(r["role"])}</td><td>{esc(r["project_name"] or "-")}</td><td>{esc(r["attendance_date"])}</td><td>{badge(r["status"],"status")}</td><td>{esc(r["captured_at"])}</td></tr>' for r in rows)
-    body = f'''<div class="card"><h1>👥 Attendance Capture</h1>{message}<form method="POST" class="form-grid"><div class="field"><label>Project Staff / Beneficiary</label><select name="user_id" required>{people_options or '<option value="">No eligible accounts</option>'}</select></div><div class="field"><label>Project</label><select name="project_id">{project_options}</select></div><div class="field"><label>Status</label><select name="status"><option>Present</option><option>Absent</option></select></div><div class="field" style="display:flex;align-items:end"><button class="btn btn-green">💾 Save Attendance</button></div></form></div><div class="card"><h2>Recent Attendance</h2><div class="table-wrap"><table><tr><th>Name</th><th>Role</th><th>Project</th><th>Date</th><th>Status</th><th>Captured</th></tr>{trs or '<tr><td colspan="6" class="empty">No attendance records.</td></tr>'}</table></div></div>'''
-    return page(body, "Attendance")
+
+    options = "".join(
+        f"<option value='{p['id']}'>{p['name']}</option>"
+        for p in projects_list
+    )
+
+    rows = "".join(f"""
+        <tr>
+            <td>{r['user_name']}</td>
+            <td>{r['project_name'] or '-'}</td>
+            <td>{r['attendance_date']}</td>
+            <td>{r['status']}</td>
+        </tr>
+    """ for r in records)
+
+    return page("Attendance", f"""
+
+    <h1>👥 Smart Attendance Management</h1>
+
+    <div class="card">
+
+        <p class="warning">
+            🔐 Face verification is required to prevent proxy attendance.
+        </p>
+
+        <form method="POST"
+              enctype="multipart/form-data">
+
+            <select name="project_id">
+                {options}
+            </select>
+
+            <input type="hidden"
+                   id="alatitude"
+                   name="latitude">
+
+            <input type="hidden"
+                   id="alongitude"
+                   name="longitude">
+
+            <input type="hidden"
+                   id="attendance_face"
+                   name="attendance_face">
 
 
-@app.route("/cctv", methods=["GET", "POST"])
-def cctv():
-    if not role_required("Authority"):
-        return "Access denied", 403
-    conn = db()
-    message = ""
-    if request.method == "POST":
-        location = request.form.get("location", "").strip()
-        feed = request.form.get("feed_url", "").strip()
-        project_id = request.form.get("project_id", "").strip()
-        if not location or not feed or not safe_external_url(feed):
-            message = '<div class="info warning">Enter a location and a valid http/https monitoring URL.</div>'
-        else:
-            conn.execute("INSERT INTO cctv_feeds(project_id,location,feed_url,created_at) VALUES(?,?,?,?)", (int(project_id) if project_id.isdigit() else None, location, feed, now()))
-            conn.commit()
-            message = '<div class="info success">✅ CCTV feed added.</div>'
-    feeds = conn.execute("SELECT c.*,p.name project_name FROM cctv_feeds c LEFT JOIN projects p ON c.project_id=p.id ORDER BY c.id DESC").fetchall()
-    projects_rows = conn.execute("SELECT id,name FROM projects ORDER BY name").fetchall()
-    conn.close()
-    project_options = '<option value="">-- Optional project --</option>' + "".join(f'<option value="{p["id"]}">{esc(p["name"])}</option>' for p in projects_rows)
-    rows = "".join(f'<tr><td>{esc(f["project_name"] or "-")}</td><td>{esc(f["location"])}</td><td>{esc(f["created_at"])}</td><td><a class="btn" href="{esc(f["feed_url"])}" target="_blank" rel="noopener noreferrer">📹 Open Feed</a></td></tr>' for f in feeds) or '<tr><td colspan="4" class="empty">No CCTV feeds configured.</td></tr>'
-    body = f'''<div class="card"><h1>📹 CCTV Monitoring Integration</h1>{message}<div class="info">For the prototype, CCTV is represented by authorized external monitoring URLs. A real camera stream requires a compatible stream/provider endpoint; this page does not pretend to generate a live camera feed.</div><form class="form-grid" method="POST"><div class="field"><label>Project / Institute</label><select name="project_id">{project_options}</select></div><div class="field"><label>Camera Location</label><input name="location" required></div><div class="field full"><label>Authorized Monitoring URL</label><input type="url" name="feed_url" placeholder="https://example.com/camera" required></div><div class="full"><button class="btn">➕ Add CCTV Feed</button></div></form></div><div class="card"><h2>Configured Feeds</h2><div class="table-wrap"><table><tr><th>Project</th><th>Location</th><th>Added</th><th>Feed</th></tr>{rows}</table></div></div>'''
-    return page(body, "CCTV")
+            <h3>🔐 Verify Your Identity</h3>
 
+            <video id="video"
+                   autoplay
+                   playsinline>
+            </video>
+
+            <canvas id="canvas"
+                    style="display:none">
+            </canvas>
+
+            <br>
+
+            <button type="button"
+                    onclick="startCamera()">
+                📷 Start Camera
+            </button>
+
+            <button type="button"
+                    onclick="captureFace()">
+                🔐 Capture Face
+            </button>
+
+            <p id="faceStatus"></p>
+
+
+            <h3>📍 GPS Location</h3>
+
+            <button type="button"
+                    onclick="attendanceLocation()">
+                📍 Capture GPS
+            </button>
+
+            <p id="attendanceStatus"></p>
+
+
+            <label>
+                📸 Additional Attendance Photo
+            </label>
+
+            <input type="file"
+                   name="photo"
+                   accept="image/*">
+
+            <button>
+                ✅ Verify Face & Mark Attendance
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>Recent Attendance Records</h2>
+
+        <table>
+
+            <tr>
+                <th>User</th>
+                <th>Project</th>
+                <th>Date</th>
+                <th>Status</th>
+            </tr>
+
+            {rows or "<tr><td colspan='4'>No records available.</td></tr>"}
+
+        </table>
+
+    </div>
+
+
+    <script>
+
+    async function startCamera() {{
+
+        try {{
+
+            const stream =
+                await navigator.mediaDevices.getUserMedia({{
+                    video: {{ facingMode: "user" }}
+                }});
+
+            document.getElementById("video").srcObject =
+                stream;
+
+        }} catch(error) {{
+
+            document.getElementById("faceStatus").innerHTML =
+                "⚠️ Camera permission is required.";
+
+        }}
+    }}
+
+
+    function captureFace() {{
+
+        const video =
+            document.getElementById("video");
+
+        const canvas =
+            document.getElementById("canvas");
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context =
+            canvas.getContext("2d");
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        document.getElementById("attendance_face").value =
+            canvas.toDataURL("image/jpeg");
+
+        document.getElementById("faceStatus").innerHTML =
+            "✅ Face captured for verification.";
+
+    }}
+
+
+    function attendanceLocation() {{
+
+        navigator.geolocation.getCurrentPosition(
+
+            function(position) {{
+
+                document.getElementById("alatitude").value =
+                    position.coords.latitude;
+
+                document.getElementById("alongitude").value =
+                    position.coords.longitude;
+
+                document.getElementById("attendanceStatus").innerHTML =
+                    "✅ Location Captured Successfully";
+
+            }},
+
+            function() {{
+
+                document.getElementById("attendanceStatus").innerHTML =
+                    "⚠️ Location permission is required.";
+
+            }}
+        );
+    }}
+
+    </script>
+    """)
+
+
+# ============================================================
+# MEETING / VIDEO CONFERENCE
+# ============================================================
 
 @app.route("/meetings", methods=["GET", "POST"])
+@login_required
 def meetings():
-    if not logged_in():
-        return redirect(url_for("login"))
-    conn = db()
-    message = ""
-    if request.method == "POST":
-        if session["role"] != "Authority":
-            conn.close()
-            return "Only Authority can create meetings", 403
-        title = request.form.get("title", "").strip()
-        if not title:
-            message = '<div class="info warning">Enter a meeting title.</div>'
-        else:
-            code = uuid.uuid4().hex[:10].upper()
-            meeting_url = url_for("meeting_room", meeting_code=code, _external=True)
-            conn.execute("INSERT INTO meetings(title,meeting_url,created_at,created_by,meeting_code) VALUES(?,?,?,?,?)", (title, meeting_url, now(), session["user_id"], code))
-            conn.commit()
-            message = f'<div class="info success">🎉 Meeting created: <b>{esc(title)}</b><br>Meeting code: <span class="meeting-code">{esc(code)}</span></div>'
-    meetings_list = conn.execute("SELECT m.*,u.name authority_name FROM meetings m LEFT JOIN users u ON m.created_by=u.id ORDER BY m.id DESC").fetchall()
+
+    conn = get_db()
+
+    if (
+        request.method == "POST" and
+        session["role"] in ["admin", "official"]
+    ):
+
+        conn.execute("""
+            INSERT INTO meetings(
+                project_id, title,
+                meeting_url, meeting_time,
+                created_at
+            )
+            VALUES(?,?,?,?,?)
+        """, (
+            request.form["project_id"],
+            request.form["title"],
+            request.form.get("meeting_url"),
+            request.form["meeting_time"],
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ))
+
+        conn.commit()
+
+    meetings_list = conn.execute("""
+        SELECT m.*, p.name project_name
+        FROM meetings m
+        LEFT JOIN projects p ON m.project_id=p.id
+        ORDER BY m.meeting_time DESC
+    """).fetchall()
+
+    projects_list = conn.execute(
+        "SELECT * FROM projects"
+    ).fetchall()
+
     conn.close()
-    form = ''
-    if session["role"] == "Authority":
-        form = '<div class="card"><h1>🎥 Create Random VC Meeting</h1><p style="color:#64748b">Create a prototype coordination room for interaction with Project Incharge/Staff/Beneficiaries.</p><form method="POST"><div class="field"><label>Meeting Title</label><input name="title" placeholder="Random Project Staff / Beneficiary VC" required></div><button class="btn btn-purple">🔔 Create Meeting</button></form></div>'
-    rows = "".join(f'<tr><td>{esc(m["title"])}</td><td>{esc(m["authority_name"] or "Authority")}</td><td>{esc(m["created_at"])}</td><td><a class="btn btn-purple" href="{esc(m["meeting_url"])}">🎥 Join</a></td></tr>' for m in meetings_list) or '<tr><td colspan="4" class="empty">No meetings available.</td></tr>'
-    body = f'{message}{form}<div class="card"><h2>🎥 Available VC Meetings</h2><div class="table-wrap"><table><tr><th>Meeting</th><th>Created By</th><th>Created</th><th>Join</th></tr>{rows}</table></div></div>'
-    return page(body, "Meetings")
+
+    form = ""
+
+    if session["role"] in ["admin", "official"]:
+
+        options = "".join(
+            f"<option value='{p['id']}'>{p['name']}</option>"
+            for p in projects_list
+        )
+
+        form = f"""
+        <div class="card">
+
+            <h2>➕ Schedule Monitoring / VC Meeting</h2>
+
+            <form method="POST">
+
+                <select name="project_id">
+                    {options}
+                </select>
+
+                <input name="title"
+                       placeholder="Meeting Title"
+                       required>
+
+                <input name="meeting_url"
+                       placeholder="VC Meeting Link">
+
+                <input type="datetime-local"
+                       name="meeting_time"
+                       required>
+
+                <button>Schedule Meeting</button>
+
+            </form>
+
+        </div>
+        """
+
+    cards = ""
+
+    for m in meetings_list:
+
+        join = ""
+
+        if m["meeting_url"]:
+            join = f"""
+            <a class='btn'
+               target='_blank'
+               href='{m["meeting_url"]}'>
+               🎥 Join Meeting
+            </a>
+            """
+
+        cards += f"""
+        <div class="card">
+
+            <h3>🎥 {m['title']}</h3>
+
+            <p>🏢 {m['project_name'] or '-'}</p>
+
+            <p>🕒 {m['meeting_time']}</p>
+
+            {join}
+
+        </div>
+        """
+
+    return page("Meetings", f"""
+
+    <h1>🎥 Meeting & VC Coordination</h1>
+
+    {form}
+
+    {cards or "<div class='card'>No meetings scheduled.</div>"}
+    """)
 
 
-@app.route("/meeting/<meeting_code>")
-def meeting_room(meeting_code):
-    if not logged_in():
-        return redirect(url_for("login"))
-    conn = db()
-    meeting = conn.execute("SELECT m.*,u.name authority_name FROM meetings m LEFT JOIN users u ON m.created_by=u.id WHERE m.meeting_code=?", (meeting_code,)).fetchone()
-    if not meeting:
-        conn.close()
-        return "Meeting not found", 404
-    conn.execute("INSERT OR IGNORE INTO meeting_participants(meeting_id,user_id,joined_at) VALUES(?,?,?)", (meeting["id"], session["user_id"], now()))
+# ============================================================
+# NOTIFICATIONS
+# ============================================================
+
+@app.route("/notifications")
+@login_required
+def notifications():
+
+    conn = get_db()
+
+    notes = conn.execute("""
+        SELECT *
+        FROM notifications
+        WHERE user_id=?
+        ORDER BY id DESC
+    """, (
+        session["user_id"],
+    )).fetchall()
+
+    conn.execute("""
+        UPDATE notifications
+        SET is_read=1
+        WHERE user_id=?
+    """, (
+        session["user_id"],
+    ))
+
     conn.commit()
-    participants = conn.execute("SELECT u.name,u.role,p.joined_at FROM meeting_participants p JOIN users u ON p.user_id=u.id WHERE p.meeting_id=? ORDER BY p.joined_at", (meeting["id"],)).fetchall()
     conn.close()
-    rows = "".join(f'<tr><td>{esc(p["name"])}</td><td>{esc(p["role"])}</td><td>🟢 Joined</td></tr>' for p in participants)
-    body = f'<div class="card" style="text-align:center"><h1>🎥 Smart Inspection VC Room</h1><div class="info success">🟢 You joined successfully.<br><br>Meeting: <b>{esc(meeting["title"])}</b><br>Code: <span class="meeting-code">{esc(meeting_code)}</span><br>Joined as: <b>{esc(session["name"])}</b> ({esc(session["role"])})</div><p style="color:#64748b">Prototype coordination room. For production, connect a WebRTC/VC provider such as an approved institutional service.</p><a class="btn" href="/meetings">← Back to Meetings</a></div><div class="card"><h2>👥 Participants</h2><div class="table-wrap"><table><tr><th>Name</th><th>Role</th><th>Status</th></tr>{rows}</table></div></div>'
-    return page(body, "Meeting Room")
+
+    cards = "".join(
+        f"""
+        <div class='card'>
+            <b>🔔 {n['message']}</b><br>
+            <small>{n['created_at']}</small>
+        </div>
+        """
+        for n in notes
+    )
+
+    return page("Notifications", f"""
+
+    <h1>🔔 Notifications & Alerts</h1>
+
+    {cards or "<div class='card'>No notifications yet.</div>"}
+    """)
 
 
-@app.route("/api/latest-meeting")
-def latest_meeting():
-    if not logged_in():
-        return jsonify({"logged_in": False}), 401
-    if session.get("role") not in ("Inspector", "Project Staff", "Beneficiary"):
-        return jsonify({"meeting": None})
-    conn = db()
-    meeting = conn.execute("SELECT m.id,m.title,m.created_at,m.meeting_url,u.name authority_name FROM meetings m LEFT JOIN users u ON m.created_by=u.id ORDER BY m.id DESC LIMIT 1").fetchone()
+# ============================================================
+# RULE-BASED ANALYTICS
+# ============================================================
+
+@app.route("/analytics")
+@login_required
+def analytics():
+
+    conn = get_db()
+
+    total_issues = conn.execute(
+        "SELECT COUNT(*) FROM issues"
+    ).fetchone()[0]
+
+    critical = conn.execute("""
+        SELECT COUNT(*)
+        FROM issues
+        WHERE severity='Critical'
+    """).fetchone()[0]
+
+    open_issues = conn.execute("""
+        SELECT COUNT(*)
+        FROM issues
+        WHERE status='Open'
+    """).fetchone()[0]
+
+    completed = conn.execute("""
+        SELECT COUNT(*)
+        FROM inspections
+        WHERE status='Completed'
+    """).fetchone()[0]
+
     conn.close()
-    if not meeting:
-        return jsonify({"meeting": None})
-    return jsonify({"meeting": {"id": meeting["id"], "title": meeting["title"], "created_at": meeting["created_at"], "meeting_url": meeting["meeting_url"], "authority_name": meeting["authority_name"] or "Authority"}})
+
+    alerts = []
+
+    if critical > 0:
+        alerts.append(
+            "🚨 Critical issues require immediate attention."
+        )
+
+    if open_issues > 5:
+        alerts.append(
+            "⚠️ High number of unresolved issues detected."
+        )
+
+    if completed == 0:
+        alerts.append(
+            "📋 No completed inspections recorded yet."
+        )
+
+    if not alerts:
+        alerts.append(
+            "✅ System status is currently stable."
+        )
+
+    alert_html = "".join(
+        f"<div class='warning'>{a}</div><br>"
+        for a in alerts
+    )
+
+    return page("Analytics", f"""
+
+    <h1>📈 Rule-Based Analytics</h1>
+
+    <div class="grid">
+
+        <div class="stat">
+            <h2>{total_issues}</h2>
+            Total Issues
+        </div>
+
+        <div class="stat">
+            <h2>{critical}</h2>
+            Critical Issues
+        </div>
+
+        <div class="stat">
+            <h2>{open_issues}</h2>
+            Open Issues
+        </div>
+
+        <div class="stat">
+            <h2>{completed}</h2>
+            Completed Inspections
+        </div>
+
+    </div>
+
+    <div class="card">
+
+        <h2>🤖 Smart System Alerts</h2>
+
+        {alert_html}
+
+    </div>
+    """)
 
 
-@app.route("/uploads/<path:filename>")
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+# ============================================================
+# API - NOTIFICATION COUNT
+# ============================================================
+
+@app.route("/api/notification-count")
+@login_required
+def notification_count():
+
+    conn = get_db()
+
+    count = conn.execute("""
+        SELECT COUNT(*)
+        FROM notifications
+        WHERE user_id=?
+        AND is_read=0
+    """, (
+        session["user_id"],
+    )).fetchone()[0]
+
+    conn.close()
+
+    return jsonify({
+        "unread_notifications": count
+    })
 
 
-@app.errorhandler(413)
-def too_large(_):
-    return page('<div class="card"><h1>File too large</h1><p>Please upload an image smaller than 10 MB.</p><a class="btn" href="/home">Back</a></div>', "Upload Error"), 413
+# ============================================================
+# INITIALIZE APPLICATION
+# ============================================================
 
-
-@app.errorhandler(404)
-def not_found(_):
-    return page('<div class="card"><h1>404 — Page not found</h1><p>The requested page does not exist.</p><a class="btn" href="/home">Go Home</a></div>', "Not Found"), 404
+init_db()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.run(
+        debug=True,
+        host="0.0.0.0",
+        port=5000
+    )
