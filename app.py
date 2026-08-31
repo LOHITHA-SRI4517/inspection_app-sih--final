@@ -1,11 +1,11 @@
 from flask import (
     Flask, request, redirect, url_for, session, jsonify,
-    send_from_directory
+    send_from_directory, render_template_string
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from datetime import datetime
 from functools import wraps
+from datetime import datetime
 import sqlite3
 import os
 import uuid
@@ -18,13 +18,15 @@ import re
 # ============================================================
 
 app = Flask(__name__)
+
 app.secret_key = os.environ.get(
     "SECRET_KEY",
-    "change-this-secret-key-in-production"
+    "change-this-secret-key-before-production"
 )
 
+# Render-compatible storage paths
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_NAME = os.path.join(BASE_DIR, "inspection.db")
+DB_NAME = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "inspection.db"))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
@@ -45,10 +47,10 @@ def get_db():
 
 
 def add_column_if_missing(conn, table, column, definition):
-    columns = [
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    ]
+    """Safely supports upgrading an existing SQLite database."""
+    columns = [row["name"] for row in conn.execute(
+        f"PRAGMA table_info({table})"
+    ).fetchall()]
 
     if column not in columns:
         conn.execute(
@@ -66,8 +68,8 @@ def init_db():
         email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'staff',
-        face_image TEXT,
-        face_registered INTEGER DEFAULT 0,
+        identity_photo TEXT,
+        identity_verified INTEGER DEFAULT 0,
         created_at TEXT
     );
 
@@ -91,17 +93,14 @@ def init_db():
         longitude TEXT,
         checklist TEXT,
         evidence TEXT,
-        verification_photo TEXT,
         remarks TEXT,
-        created_at TEXT,
-        FOREIGN KEY(project_id) REFERENCES projects(id),
-        FOREIGN KEY(inspector_id) REFERENCES users(id)
+        identity_check_photo TEXT,
+        created_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS issues (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         inspection_id INTEGER,
-        project_id INTEGER,
         reported_by INTEGER,
         title TEXT NOT NULL,
         description TEXT,
@@ -118,7 +117,6 @@ def init_db():
         latitude TEXT,
         longitude TEXT,
         photo TEXT,
-        verification_status TEXT DEFAULT 'Captured',
         attendance_date TEXT,
         status TEXT DEFAULT 'Present'
     );
@@ -139,46 +137,23 @@ def init_db():
         meeting_time TEXT,
         created_at TEXT
     );
-
-    CREATE TABLE IF NOT EXISTS face_verifications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        action TEXT,
-        photo TEXT,
-        verification_status TEXT DEFAULT 'Captured',
-        created_at TEXT
-    );
     """)
 
-    # Supports existing databases from older versions
-    add_column_if_missing(conn, "users", "face_image", "TEXT")
-    add_column_if_missing(
-        conn, "users", "face_registered", "INTEGER DEFAULT 0"
-    )
-    add_column_if_missing(
-        conn, "inspections", "verification_photo", "TEXT"
-    )
-    add_column_if_missing(
-        conn, "attendance",
-        "verification_status",
-        "TEXT DEFAULT 'Captured'"
-    )
+    # Safe upgrades for older databases
+    add_column_if_missing(conn, "users", "identity_photo", "TEXT")
+    add_column_if_missing(conn, "users", "identity_verified",
+                          "INTEGER DEFAULT 0")
+
+    add_column_if_missing(conn, "inspections",
+                          "identity_check_photo", "TEXT")
 
     conn.commit()
     conn.close()
 
 
 # ============================================================
-# HELPERS
+# SECURITY HELPERS
 # ============================================================
-
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def today():
-    return datetime.now().strftime("%Y-%m-%d")
-
 
 def login_required(f):
     @wraps(f)
@@ -199,8 +174,7 @@ def role_required(*roles):
             if session.get("role") not in roles:
                 return page(
                     "Access Denied",
-                    "<div class='card danger'>"
-                    "<h2>Access Denied</h2>"
+                    "<div class='card'><h2>🚫 Access Denied</h2>"
                     "<p>You don't have permission to access this page.</p>"
                     "</div>"
                 ), 403
@@ -215,22 +189,18 @@ def notify(user_id, message):
     conn.execute("""
         INSERT INTO notifications(user_id, message, created_at)
         VALUES (?, ?, ?)
-    """, (user_id, message, now()))
+    """, (
+        user_id,
+        message,
+        datetime.now().strftime("%Y-%m-%d %H:%M")
+    ))
     conn.commit()
     conn.close()
 
 
-def notify_role(role, message):
-    conn = get_db()
-    users = conn.execute(
-        "SELECT id FROM users WHERE role=?",
-        (role,)
-    ).fetchall()
-    conn.close()
-
-    for user in users:
-        notify(user["id"], message)
-
+# ============================================================
+# FILE / CAMERA IMAGE HELPERS
+# ============================================================
 
 def allowed_file(filename):
     return (
@@ -248,41 +218,52 @@ def save_file(file):
 
     ext = secure_filename(file.filename).rsplit(".", 1)[1].lower()
     filename = f"{uuid.uuid4().hex}.{ext}"
+
     file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+
     return filename
 
 
 def save_camera_image(data_url):
-    """Save image captured from browser camera."""
+    """
+    Saves a browser camera image.
+    Expected format:
+    data:image/jpeg;base64,/9j/4AAQ...
+    """
 
-    if not data_url or "," not in data_url:
+    if not data_url or not data_url.startswith("data:image"):
         return None
 
     try:
-        header, encoded = data_url.split(",", 1)
+        match = re.match(
+            r"data:image/(png|jpeg|jpg|webp);base64,(.*)",
+            data_url,
+            re.DOTALL
+        )
 
-        match = re.search(r"image/(png|jpeg|jpg|webp)", header.lower())
-        ext = "jpg"
+        if not match:
+            return None
 
-        if match:
-            ext = match.group(1)
-            if ext == "jpeg":
-                ext = "jpg"
+        image_type = match.group(1)
+        encoded_data = match.group(2)
 
-        image_data = base64.b64decode(encoded)
+        ext = "jpg" if image_type == "jpeg" else image_type
+
         filename = f"{uuid.uuid4().hex}.{ext}"
-
-        path = os.path.join(
+        filepath = os.path.join(
             app.config["UPLOAD_FOLDER"],
             filename
         )
 
-        with open(path, "wb") as image_file:
+        image_data = base64.b64decode(encoded_data)
+
+        with open(filepath, "wb") as image_file:
             image_file.write(image_data)
 
         return filename
 
-    except Exception:
+    except Exception as e:
+        print("Camera image error:", e)
         return None
 
 
@@ -298,11 +279,11 @@ def page(title, content):
 
     if session.get("user_id"):
         nav = f"""
-        <div class="sidebar">
+        <aside class="sidebar">
             <h2>🛡️ SmartInspect</h2>
 
-            <div class="user">
-                👤 {user}<br>
+            <div class="user-box">
+                👤 <b>{user}</b><br>
                 <small>{role.upper()}</small>
             </div>
 
@@ -318,16 +299,20 @@ def page(title, content):
                 <span id="notificationBadge"></span>
             </a>
             <a href="/analytics">📈 Analytics</a>
-            <a href="/face-registration">📷 Face Security</a>
+            <a href="/profile">👤 Identity Profile</a>
+            <hr>
             <a href="/logout">🚪 Logout</a>
-        </div>
+        </aside>
         """
+
+    margin = "260px" if session.get("user_id") else "0"
 
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>{title} | SmartInspect</title>
+
         <meta name="viewport"
               content="width=device-width, initial-scale=1">
 
@@ -344,8 +329,10 @@ def page(title, content):
             }}
 
             .sidebar {{
-                width: 240px;
                 position: fixed;
+                left: 0;
+                top: 0;
+                width: 235px;
                 height: 100vh;
                 overflow-y: auto;
                 background: #0f172a;
@@ -359,10 +346,10 @@ def page(title, content):
 
             .sidebar a {{
                 display: block;
-                padding: 12px;
-                margin: 5px 0;
                 color: white;
                 text-decoration: none;
+                padding: 11px;
+                margin: 5px 0;
                 border-radius: 8px;
             }}
 
@@ -370,22 +357,22 @@ def page(title, content):
                 background: #1e293b;
             }}
 
-            .user {{
+            .user-box {{
                 background: #1e293b;
                 padding: 12px;
-                border-radius: 8px;
+                border-radius: 10px;
                 margin-bottom: 15px;
             }}
 
             .main {{
-                margin-left: {"260px" if session.get("user_id") else "0"};
+                margin-left: {margin};
                 padding: 30px;
-                max-width: 1400px;
+                max-width: 1450px;
             }}
 
             .card {{
                 background: white;
-                padding: 20px;
+                padding: 22px;
                 border-radius: 14px;
                 box-shadow: 0 3px 12px rgba(0,0,0,.08);
                 margin-bottom: 20px;
@@ -413,6 +400,10 @@ def page(title, content):
                 border-radius: 7px;
             }}
 
+            textarea {{
+                min-height: 100px;
+            }}
+
             button, .btn {{
                 background: #2563eb;
                 color: white;
@@ -422,15 +413,31 @@ def page(title, content):
                 cursor: pointer;
                 text-decoration: none;
                 display: inline-block;
-                margin: 3px;
+                margin: 4px;
             }}
 
             button:hover, .btn:hover {{
                 background: #1d4ed8;
             }}
 
-            .secondary {{
-                background: #475569;
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+            }}
+
+            th, td {{
+                padding: 12px;
+                border-bottom: 1px solid #e2e8f0;
+                text-align: left;
+            }}
+
+            th {{
+                background: #eff6ff;
+            }}
+
+            .login {{
+                max-width: 500px;
+                margin: 60px auto;
             }}
 
             .success {{
@@ -451,41 +458,21 @@ def page(title, content):
                 border-radius: 8px;
             }}
 
-            table {{
+            video {{
                 width: 100%;
-                border-collapse: collapse;
-                background: white;
-            }}
-
-            th, td {{
-                padding: 12px;
-                border-bottom: 1px solid #e2e8f0;
-                text-align: left;
-            }}
-
-            th {{
-                background: #eff6ff;
-            }}
-
-            .login {{
-                max-width: 450px;
-                margin: 70px auto;
-            }}
-
-            video, canvas, .camera-preview {{
-                max-width: 100%;
+                max-width: 400px;
                 border-radius: 12px;
-                margin: 10px 0;
+                background: black;
             }}
 
             #notificationBadge {{
                 background: #ef4444;
-                border-radius: 50%;
+                border-radius: 20px;
                 padding: 2px 7px;
                 font-size: 12px;
             }}
 
-            @media(max-width:700px) {{
+            @media(max-width: 700px) {{
                 .sidebar {{
                     position: relative;
                     width: 100%;
@@ -503,9 +490,9 @@ def page(title, content):
     <body>
         {nav}
 
-        <div class="main">
+        <main class="main">
             {content}
-        </div>
+        </main>
 
         <script>
         async function checkNotifications() {{
@@ -523,7 +510,7 @@ def page(title, content):
                     badge.innerText = data.unread_notifications;
                 }}
             }} catch (error) {{
-                console.log("Notification check unavailable");
+                console.log('Notification check unavailable');
             }}
         }}
 
@@ -536,20 +523,7 @@ def page(title, content):
 
 
 # ============================================================
-# FILE ACCESS
-# ============================================================
-
-@app.route("/uploads/<filename>")
-@login_required
-def uploaded_file(filename):
-    return send_from_directory(
-        app.config["UPLOAD_FOLDER"],
-        filename
-    )
-
-
-# ============================================================
-# HOME / AUTHENTICATION
+# HOME
 # ============================================================
 
 @app.route("/")
@@ -558,21 +532,30 @@ def home():
         return redirect(url_for("dashboard"))
 
     return page("Welcome", """
-    <div class="login card">
-        <h1>🛡️ SmartInspect</h1>
-        <h3>Smart Real-Time Monitoring & Inspection System</h3>
-        <p>
-            Centralized monitoring, inspections, evidence,
-            attendance and compliance management.
-        </p>
+        <div class="login card">
+            <h1>🛡️ SmartInspect</h1>
+            <h3>Smart Real-Time Monitoring & Inspection System</h3>
 
-        <a class="btn" href="/login">🔐 Login</a>
-        <a class="btn secondary" href="/register">
-            Register Organization
-        </a>
-    </div>
+            <p>
+                A centralized platform for monitoring,
+                inspections, attendance, evidence collection,
+                issue resolution and stakeholder coordination.
+            </p>
+
+            <a class="btn" href="/login">🔐 Login</a>
+            <a class="btn" href="/register">📝 Register</a>
+
+            <p><small>
+                No demo accounts are hardcoded into the system.
+                Each user uses their own registered credentials.
+            </small></p>
+        </div>
     """)
 
+
+# ============================================================
+# REGISTER WITH CAMERA IDENTITY CAPTURE
+# ============================================================
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -582,36 +565,37 @@ def register():
         name = request.form.get("name", "").strip()
         email = request.form.get("email", "").lower().strip()
         password = request.form.get("password", "")
+        camera_image = request.form.get("camera_image")
 
-        if not name or not email or len(password) < 6:
-            message = (
-                "<div class='danger'>"
-                "Please enter valid details. Password must have "
-                "at least 6 characters."
-                "</div>"
-            )
+        if not name or not email or not password:
+            message = "<div class='danger'>Please fill all required fields.</div>"
         else:
-            conn = get_db()
+            identity_photo = save_camera_image(camera_image)
 
+            conn = get_db()
             count = conn.execute(
                 "SELECT COUNT(*) FROM users"
             ).fetchone()[0]
 
-            # First real account becomes Admin
+            # First real registered user becomes admin.
+            # No demo credentials are created.
             role = "admin" if count == 0 else "staff"
 
             try:
                 conn.execute("""
                     INSERT INTO users(
-                        name,email,password,role,created_at
+                        name, email, password, role,
+                        identity_photo, identity_verified, created_at
                     )
-                    VALUES(?,?,?,?,?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     name,
                     email,
                     generate_password_hash(password),
                     role,
-                    now()
+                    identity_photo,
+                    1 if identity_photo else 0,
+                    datetime.now().strftime("%Y-%m-%d %H:%M")
                 ))
 
                 conn.commit()
@@ -621,42 +605,110 @@ def register():
 
             except sqlite3.IntegrityError:
                 conn.close()
-                message = (
-                    "<div class='danger'>"
-                    "Email already registered."
-                    "</div>"
-                )
+                message = "<div class='danger'>Email already registered.</div>"
 
     return page("Register", f"""
-    <div class="login card">
-        <h2>Create Account</h2>
-        {message}
+        <div class="login card">
+            <h2>📝 Create Secure Account</h2>
+            {message}
 
-        <form method="POST">
-            <input name="name"
-                   placeholder="Full Name"
-                   required>
+            <form method="POST" id="registerForm">
 
-            <input type="email"
-                   name="email"
-                   placeholder="Official Email"
-                   required>
+                <input name="name"
+                       placeholder="Full Name"
+                       required>
 
-            <input type="password"
-                   name="password"
-                   placeholder="Password (minimum 6 characters)"
-                   required>
+                <input type="email"
+                       name="email"
+                       placeholder="Official Email"
+                       required>
 
-            <button>Create Account</button>
-        </form>
+                <input type="password"
+                       name="password"
+                       placeholder="Password"
+                       required>
 
-        <p>
-            Already registered?
-            <a href="/login">Login</a>
-        </p>
-    </div>
+                <h3>📷 Identity Photo Registration</h3>
+
+                <video id="camera"
+                       autoplay
+                       playsinline></video>
+
+                <br>
+
+                <button type="button"
+                        onclick="startCamera()">
+                    Start Camera
+                </button>
+
+                <button type="button"
+                        onclick="capturePhoto()">
+                    Capture Identity Photo
+                </button>
+
+                <canvas id="canvas"
+                        style="display:none;"></canvas>
+
+                <input type="hidden"
+                       name="camera_image"
+                       id="camera_image">
+
+                <p id="cameraStatus"></p>
+
+                <button>Create Account</button>
+            </form>
+
+            <p>
+                Already registered?
+                <a href="/login">Login here</a>
+            </p>
+        </div>
+
+        <script>
+        let stream;
+
+        async function startCamera() {{
+            try {{
+                stream = await navigator.mediaDevices.getUserMedia({{
+                    video: true
+                }});
+
+                document.getElementById('camera').srcObject = stream;
+
+                document.getElementById('cameraStatus').innerHTML =
+                    '✅ Camera ready';
+            }} catch (error) {{
+                document.getElementById('cameraStatus').innerHTML =
+                    '⚠️ Camera permission is required for identity capture.';
+            }}
+        }}
+
+        function capturePhoto() {{
+            const video = document.getElementById('camera');
+            const canvas = document.getElementById('canvas');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            canvas.getContext('2d').drawImage(
+                video, 0, 0,
+                canvas.width, canvas.height
+            );
+
+            const image = canvas.toDataURL('image/jpeg');
+
+            document.getElementById('camera_image').value = image;
+
+            document.getElementById('cameraStatus').innerHTML =
+                '✅ Identity photo captured successfully';
+        }}
+        </script>
     """)
 
+
+# ============================================================
+# LOGIN
+# ============================================================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -674,10 +726,7 @@ def login():
 
         conn.close()
 
-        if user and check_password_hash(
-            user["password"],
-            password
-        ):
+        if user and check_password_hash(user["password"], password):
             session.clear()
             session["user_id"] = user["id"]
             session["name"] = user["name"]
@@ -685,37 +734,37 @@ def login():
 
             return redirect(url_for("dashboard"))
 
-        error = (
-            "<div class='danger'>"
-            "Invalid email or password."
-            "</div>"
-        )
+        error = """
+            <div class='danger'>
+                Invalid email or password.
+            </div>
+        """
 
     return page("Login", f"""
-    <div class="login card">
-        <h2>🔐 Secure Login</h2>
+        <div class="login card">
+            <h2>🔐 Secure Login</h2>
 
-        {error}
+            {error}
 
-        <form method="POST">
-            <input type="email"
-                   name="email"
-                   placeholder="Email"
-                   required>
+            <form method="POST">
+                <input type="email"
+                       name="email"
+                       placeholder="Email"
+                       required>
 
-            <input type="password"
-                   name="password"
-                   placeholder="Password"
-                   required>
+                <input type="password"
+                       name="password"
+                       placeholder="Password"
+                       required>
 
-            <button>Login</button>
-        </form>
+                <button>Login Securely</button>
+            </form>
 
-        <p>
-            New organization?
-            <a href="/register">Create an account</a>
-        </p>
-    </div>
+            <p>
+                New user?
+                <a href="/register">Create an account</a>
+            </p>
+        </div>
     """)
 
 
@@ -723,131 +772,6 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("home"))
-
-
-# ============================================================
-# FACE REGISTRATION
-# ============================================================
-
-@app.route("/face-registration", methods=["GET", "POST"])
-@login_required
-def face_registration():
-
-    if request.method == "POST":
-        image_data = request.form.get("camera_image")
-        filename = save_camera_image(image_data)
-
-        if not filename:
-            return page(
-                "Face Registration",
-                """
-                <div class="card danger">
-                    <h2>Camera capture failed</h2>
-                    <a class="btn" href="/face-registration">
-                        Try Again
-                    </a>
-                </div>
-                """
-            )
-
-        conn = get_db()
-
-        conn.execute("""
-            UPDATE users
-            SET face_image=?, face_registered=1
-            WHERE id=?
-        """, (filename, session["user_id"]))
-
-        conn.commit()
-        conn.close()
-
-        return redirect(url_for("dashboard"))
-
-    return page("Face Registration", """
-    <div class="card">
-        <h1>📷 Face Registration</h1>
-
-        <p>
-            Register your identity photograph using your device camera.
-            This image is used as a security identity record.
-        </p>
-
-        <div class="warning">
-            ⚠️ Allow camera permission when your browser asks.
-        </div><br>
-
-        <video id="video" autoplay playsinline></video>
-        <canvas id="canvas" style="display:none;"></canvas>
-
-        <form method="POST" id="faceForm">
-            <input type="hidden"
-                   name="camera_image"
-                   id="camera_image">
-
-            <button type="button" onclick="startCamera()">
-                📷 Start Camera
-            </button>
-
-            <button type="button" onclick="captureFace()">
-                📸 Capture & Register Face
-            </button>
-
-            <button type="submit">
-                ✅ Save Registration
-            </button>
-        </form>
-
-        <p id="status"></p>
-    </div>
-
-    <script>
-    let stream;
-
-    async function startCamera() {
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "user" },
-                audio: false
-            });
-
-            document.getElementById("video").srcObject = stream;
-            document.getElementById("status").innerText =
-                "✅ Camera is ready";
-
-        } catch (error) {
-            document.getElementById("status").innerText =
-                "❌ Camera permission is required.";
-        }
-    }
-
-    function captureFace() {
-        const video = document.getElementById("video");
-        const canvas = document.getElementById("canvas");
-
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-
-        const context = canvas.getContext("2d");
-        context.drawImage(
-            video,
-            0,
-            0,
-            canvas.width,
-            canvas.height
-        );
-
-        document.getElementById("camera_image").value =
-            canvas.toDataURL("image/jpeg", 0.9);
-
-        document.getElementById("status").innerText =
-            "✅ Face captured. Click Save Registration.";
-
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-        }
-    }
-    </script>
-    """)
 
 
 # ============================================================
@@ -859,33 +783,35 @@ def face_registration():
 def dashboard():
     conn = get_db()
 
-    projects = conn.execute(
-        "SELECT COUNT(*) FROM projects WHERE status='Active'"
+    project_count = conn.execute(
+        "SELECT COUNT(*) FROM projects"
     ).fetchone()[0]
 
-    inspections = conn.execute(
+    inspection_count = conn.execute(
         "SELECT COUNT(*) FROM inspections"
     ).fetchone()[0]
 
-    open_issues = conn.execute("""
+    open_issue_count = conn.execute("""
         SELECT COUNT(*) FROM issues
         WHERE status != 'Resolved'
     """).fetchone()[0]
 
+    today = datetime.now().strftime("%Y-%m-%d")
+
     attendance_count = conn.execute("""
         SELECT COUNT(*) FROM attendance
         WHERE attendance_date=?
-    """, (today(),)).fetchone()[0]
+    """, (today,)).fetchone()[0]
 
     recent = conn.execute("""
         SELECT
-            i.*,
-            p.name AS project_name,
-            u.name AS inspector_name
-        FROM inspections i
-        LEFT JOIN projects p ON p.id = i.project_id
-        LEFT JOIN users u ON u.id = i.inspector_id
-        ORDER BY i.id DESC
+            inspections.title,
+            inspections.status,
+            projects.name AS project_name
+        FROM inspections
+        LEFT JOIN projects
+            ON inspections.project_id = projects.id
+        ORDER BY inspections.id DESC
         LIMIT 5
     """).fetchall()
 
@@ -896,53 +822,50 @@ def dashboard():
     for item in recent:
         rows += f"""
         <tr>
-            <td>{item["title"] or "Inspection"}</td>
-            <td>{item["project_name"] or "Not assigned"}</td>
-            <td>{item["inspector_name"] or "Not assigned"}</td>
-            <td>{item["status"]}</td>
+            <td>{item['title'] or 'Inspection'}</td>
+            <td>{item['project_name'] or 'Not assigned'}</td>
+            <td>{item['status']}</td>
         </tr>
         """
 
     return page("Dashboard", f"""
-    <h1>📊 Real-Time Monitoring Dashboard</h1>
+        <h1>📊 Real-Time Monitoring Dashboard</h1>
 
-    <div class="grid">
-        <div class="stat">
-            <h2>{projects}</h2>
-            🏢 Active Projects
+        <div class="grid">
+            <div class="stat">
+                <h2>{project_count}</h2>
+                🏢 Projects / Institutes
+            </div>
+
+            <div class="stat">
+                <h2>{inspection_count}</h2>
+                📋 Inspections
+            </div>
+
+            <div class="stat">
+                <h2>{open_issue_count}</h2>
+                ⚠️ Open Issues
+            </div>
+
+            <div class="stat">
+                <h2>{attendance_count}</h2>
+                👥 Today's Attendance
+            </div>
         </div>
 
-        <div class="stat">
-            <h2>{inspections}</h2>
-            📋 Total Inspections
+        <div class="card">
+            <h2>Recent Inspection Activity</h2>
+
+            <table>
+                <tr>
+                    <th>Inspection</th>
+                    <th>Project</th>
+                    <th>Status</th>
+                </tr>
+
+                {rows or "<tr><td colspan='3'>No activity yet.</td></tr>"}
+            </table>
         </div>
-
-        <div class="stat">
-            <h2>{open_issues}</h2>
-            ⚠️ Open Issues
-        </div>
-
-        <div class="stat">
-            <h2>{attendance_count}</h2>
-            👥 Today's Attendance
-        </div>
-    </div>
-
-    <div class="card">
-        <h2>Recent Inspection Activity</h2>
-
-        <table>
-            <tr>
-                <th>Inspection</th>
-                <th>Project</th>
-                <th>Inspector</th>
-                <th>Status</th>
-            </tr>
-
-            {rows or
-             "<tr><td colspan='4'>No inspections yet.</td></tr>"}
-        </table>
-    </div>
     """)
 
 
@@ -953,40 +876,42 @@ def dashboard():
 @app.route("/projects", methods=["GET", "POST"])
 @login_required
 def projects():
+
     conn = get_db()
 
     if request.method == "POST":
 
-        if session["role"] not in ["admin", "official"]:
+        if session.get("role") not in ["admin", "official"]:
             conn.close()
-            return "Access Denied", 403
+            return "Access denied", 403
 
         conn.execute("""
             INSERT INTO projects(
-                name,location,incharge,cctv_url,status,created_at
+                name, location, incharge,
+                cctv_url, status, created_at
             )
-            VALUES(?,?,?,?,?,?)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             request.form.get("name"),
             request.form.get("location"),
             request.form.get("incharge"),
             request.form.get("cctv_url"),
             "Active",
-            now()
+            datetime.now().strftime("%Y-%m-%d %H:%M")
         ))
 
         conn.commit()
 
-    project_list = conn.execute("""
-        SELECT * FROM projects ORDER BY id DESC
-    """).fetchall()
+    project_list = conn.execute(
+        "SELECT * FROM projects ORDER BY id DESC"
+    ).fetchall()
 
     conn.close()
 
-    form = ""
+    add_form = ""
 
-    if session["role"] in ["admin", "official"]:
-        form = """
+    if session.get("role") in ["admin", "official"]:
+        add_form = """
         <div class="card">
             <h2>➕ Add Project / Institute</h2>
 
@@ -1002,7 +927,7 @@ def projects():
                        placeholder="Project Incharge">
 
                 <input name="cctv_url"
-                       placeholder="CCTV / Monitoring URL">
+                       placeholder="Authorized CCTV / Monitoring URL">
 
                 <button>Add Project</button>
             </form>
@@ -1016,40 +941,42 @@ def projects():
         cctv = "Not Connected"
 
         if project["cctv_url"]:
-            cctv = (
-                f"<a class='btn' target='_blank' "
-                f"href='{project['cctv_url']}'>📹 View CCTV</a>"
-            )
+            cctv = f"""
+            <a class="btn"
+               href="{project['cctv_url']}"
+               target="_blank">
+               📹 Open CCTV
+            </a>
+            """
 
         rows += f"""
         <tr>
-            <td>{project["name"]}</td>
-            <td>{project["location"] or "-"}</td>
-            <td>{project["incharge"] or "-"}</td>
-            <td>{project["status"]}</td>
+            <td>{project['name']}</td>
+            <td>{project['location'] or '-'}</td>
+            <td>{project['incharge'] or '-'}</td>
+            <td>{project['status']}</td>
             <td>{cctv}</td>
         </tr>
         """
 
     return page("Projects", f"""
-    <h1>🏢 Project & Institute Management</h1>
+        <h1>🏢 Project & Institute Management</h1>
 
-    {form}
+        {add_form}
 
-    <div class="card">
-        <table>
-            <tr>
-                <th>Name</th>
-                <th>Location</th>
-                <th>Incharge</th>
-                <th>Status</th>
-                <th>CCTV</th>
-            </tr>
+        <div class="card">
+            <table>
+                <tr>
+                    <th>Name</th>
+                    <th>Location</th>
+                    <th>Incharge</th>
+                    <th>Status</th>
+                    <th>Monitoring</th>
+                </tr>
 
-            {rows or
-             "<tr><td colspan='5'>No projects available.</td></tr>"}
-        </table>
-    </div>
+                {rows or "<tr><td colspan='5'>No projects yet.</td></tr>"}
+            </table>
+        </div>
     """)
 
 
@@ -1062,7 +989,7 @@ def projects():
 def assign_inspector():
 
     project_id = request.form.get("project_id")
-    title = request.form.get("title") or "Surprise Inspection"
+    title = request.form.get("title", "Surprise Inspection")
 
     conn = get_db()
 
@@ -1073,15 +1000,14 @@ def assign_inspector():
 
     if not inspectors:
         conn.close()
-
         return page(
-            "Inspector Assignment",
+            "Inspector Required",
             """
-            <div class="card warning">
-                <h2>No Inspector Available</h2>
+            <div class="card">
+                <h2>⚠️ No Inspector Available</h2>
                 <p>
-                    An administrator must create or assign
-                    an Inspector/Official account first.
+                    An administrator should assign an appropriate
+                    user role before creating an inspection.
                 </p>
             </div>
             """
@@ -1091,15 +1017,16 @@ def assign_inspector():
 
     conn.execute("""
         INSERT INTO inspections(
-            project_id,inspector_id,title,status,created_at
+            project_id, inspector_id, title,
+            status, created_at
         )
-        VALUES(?,?,?,?,?)
+        VALUES (?, ?, ?, ?, ?)
     """, (
         project_id,
         inspector["id"],
         title,
         "Assigned",
-        now()
+        datetime.now().strftime("%Y-%m-%d %H:%M")
     ))
 
     conn.commit()
@@ -1107,9 +1034,7 @@ def assign_inspector():
 
     notify(
         inspector["id"],
-        f"🎲 Security assignment: You have been assigned "
-        f"to '{title}'. Please complete identity verification "
-        f"before starting."
+        f"🎲 You have been assigned an inspection: {title}"
     )
 
     return redirect(url_for("inspections"))
@@ -1129,36 +1054,40 @@ def inspections():
         "SELECT * FROM projects"
     ).fetchall()
 
-    if session["role"] in ["inspector", "staff"]:
-        inspections_list = conn.execute("""
-            SELECT
-                i.*,
-                p.name AS project_name,
-                u.name AS inspector_name
-            FROM inspections i
-            LEFT JOIN projects p ON p.id=i.project_id
-            LEFT JOIN users u ON u.id=i.inspector_id
-            WHERE i.inspector_id=?
-            ORDER BY i.id DESC
+    if session.get("role") == "inspector":
+
+        inspection_list = conn.execute("""
+            SELECT inspections.*,
+                   projects.name AS project_name,
+                   users.name AS inspector_name
+            FROM inspections
+            LEFT JOIN projects
+                ON inspections.project_id = projects.id
+            LEFT JOIN users
+                ON inspections.inspector_id = users.id
+            WHERE inspections.inspector_id=?
+            ORDER BY inspections.id DESC
         """, (session["user_id"],)).fetchall()
 
     else:
-        inspections_list = conn.execute("""
-            SELECT
-                i.*,
-                p.name AS project_name,
-                u.name AS inspector_name
-            FROM inspections i
-            LEFT JOIN projects p ON p.id=i.project_id
-            LEFT JOIN users u ON u.id=i.inspector_id
-            ORDER BY i.id DESC
+
+        inspection_list = conn.execute("""
+            SELECT inspections.*,
+                   projects.name AS project_name,
+                   users.name AS inspector_name
+            FROM inspections
+            LEFT JOIN projects
+                ON inspections.project_id = projects.id
+            LEFT JOIN users
+                ON inspections.inspector_id = users.id
+            ORDER BY inspections.id DESC
         """).fetchall()
 
     conn.close()
 
     assignment_form = ""
 
-    if session["role"] in ["admin", "official"]:
+    if session.get("role") in ["admin", "official"]:
 
         options = "".join(
             f"<option value='{p['id']}'>{p['name']}</option>"
@@ -1178,59 +1107,62 @@ def inspections():
                     {options}
                 </select>
 
-                <button>
-                    🎲 Randomly Assign Inspector
-                </button>
+                <button>🎲 Assign Random Inspector</button>
             </form>
         </div>
         """
 
     cards = ""
 
-    for inspection in inspections_list:
+    for inspection in inspection_list:
 
-        if inspection["status"] == "Completed":
-            cards += f"""
-            <div class="card">
-                <h3>📋 {inspection["title"]}</h3>
-                <p>
-                    <b>Project:</b>
-                    {inspection["project_name"] or "-"}
-                </p>
-                <p>
-                    <b>Inspector:</b>
-                    {inspection["inspector_name"] or "-"}
-                </p>
-                <p class="success">✅ Completed</p>
-            </div>
-            """
+        button = ""
 
-        else:
-            cards += f"""
-            <div class="card">
-                <h3>📋 {inspection["title"]}</h3>
-                <p>
-                    <b>Project:</b>
-                    {inspection["project_name"] or "-"}
-                </p>
-                <p><b>Status:</b> {inspection["status"]}</p>
+        if inspection["status"] != "Completed":
 
+            if (
+                session.get("role") == "inspector" and
+                inspection["inspector_id"] == session["user_id"]
+            ):
+                button = f"""
                 <a class="btn"
                    href="/inspection-form/{inspection['id']}">
-                    📋 Start Inspection
+                    🔐 Verify Identity & Start
                 </a>
-            </div>
-            """
+                """
+
+        cards += f"""
+        <div class="card">
+            <h3>📋 {inspection['title']}</h3>
+
+            <p><b>Project:</b>
+                {inspection['project_name'] or '-'}
+            </p>
+
+            <p><b>Inspector:</b>
+                {inspection['inspector_name'] or '-'}
+            </p>
+
+            <p><b>Status:</b>
+                {inspection['status']}
+            </p>
+
+            {button}
+        </div>
+        """
 
     return page("Inspections", f"""
-    <h1>📋 Digital Inspection Module</h1>
+        <h1>📋 Digital Inspection Module</h1>
 
-    {assignment_form}
+        {assignment_form}
 
-    {cards or
-     "<div class='card'>No inspections assigned yet.</div>"}
+        {cards or "<div class='card'>No inspections available.</div>"}
     """)
 
+
+# ============================================================
+# INSPECTION FORM + IDENTITY PHOTO + GPS
+# ============================================================
 
 @app.route("/inspection-form/<int:inspection_id>",
            methods=["GET", "POST"])
@@ -1248,268 +1180,233 @@ def inspection_form(inspection_id):
         return "Inspection not found", 404
 
     if (
-        session["role"] in ["inspector", "staff"] and
+        session.get("role") == "inspector" and
         inspection["inspector_id"] != session["user_id"]
     ):
         conn.close()
-        return "Access Denied", 403
+        return "Access denied", 403
 
     if request.method == "POST":
 
-        checklist = ", ".join(
-            request.form.getlist("checklist")
+        identity_photo = save_camera_image(
+            request.form.get("verification_photo")
         )
 
         evidence = save_file(
             request.files.get("evidence")
         )
 
-        verification_photo = save_camera_image(
-            request.form.get("verification_photo")
+        checklist = ", ".join(
+            request.form.getlist("checklist")
         )
-
-        if not verification_photo:
-            conn.close()
-
-            return page(
-                "Verification Required",
-                """
-                <div class="card danger">
-                    <h2>📷 Identity Verification Required</h2>
-                    <p>
-                        Please capture your live camera photo
-                        before submitting the inspection.
-                    </p>
-                </div>
-                """
-            )
 
         conn.execute("""
             UPDATE inspections
-            SET
-                status='Completed',
+            SET status=?,
                 latitude=?,
                 longitude=?,
                 checklist=?,
                 evidence=?,
-                verification_photo=?,
-                remarks=?
+                remarks=?,
+                identity_check_photo=?
             WHERE id=?
         """, (
+            "Completed",
             request.form.get("latitude"),
             request.form.get("longitude"),
             checklist,
             evidence,
-            verification_photo,
             request.form.get("remarks"),
+            identity_photo,
             inspection_id
-        ))
-
-        conn.execute("""
-            INSERT INTO face_verifications(
-                user_id,action,photo,verification_status,created_at
-            )
-            VALUES(?,?,?,?,?)
-        """, (
-            session["user_id"],
-            "Inspection Submission",
-            verification_photo,
-            "Captured",
-            now()
         ))
 
         conn.commit()
         conn.close()
-
-        notify_role(
-            "admin",
-            "📋 An inspection report has been completed."
-        )
 
         return redirect(url_for("inspections"))
 
     conn.close()
 
     return page("Inspection Form", f"""
-    <div class="card">
-        <h1>📋 Smart Inspection Form</h1>
+        <div class="card">
 
-        <form method="POST"
-              enctype="multipart/form-data">
+            <h1>📋 Secure Inspection Form</h1>
 
-            <input type="hidden"
-                   name="latitude"
-                   id="latitude">
-
-            <input type="hidden"
-                   name="longitude"
-                   id="longitude">
-
-            <input type="hidden"
-                   name="verification_photo"
-                   id="verification_photo">
-
-            <h3>📍 GPS Location</h3>
-
-            <button type="button"
-                    onclick="getLocation()">
-                Capture Current Location
-            </button>
-
-            <p id="locationStatus"></p>
-
-            <h3>📷 Identity Verification Capture</h3>
-
-            <p>
-                Capture a live photo before submitting
-                this official inspection.
+            <p class="warning">
+                🔐 Capture a current identity photo before
+                submitting the inspection report.
             </p>
 
-            <video id="video"
-                   autoplay
-                   playsinline></video>
+            <form method="POST"
+                  enctype="multipart/form-data">
 
-            <canvas id="canvas"
-                    style="display:none;"></canvas>
+                <input type="hidden"
+                       name="latitude"
+                       id="latitude">
 
-            <br>
+                <input type="hidden"
+                       name="longitude"
+                       id="longitude">
 
-            <button type="button"
-                    onclick="startCamera()">
-                Start Camera
-            </button>
+                <input type="hidden"
+                       name="verification_photo"
+                       id="verification_photo">
 
-            <button type="button"
-                    onclick="captureVerification()">
-                Capture Verification
-            </button>
+                <h3>📷 Identity Verification Capture</h3>
 
-            <p id="faceStatus"></p>
+                <video id="camera"
+                       autoplay
+                       playsinline></video>
 
-            <h3>📋 Inspection Checklist</h3>
+                <br>
 
-            <label>
-                <input type="checkbox"
-                       name="checklist"
-                       value="Infrastructure Verified">
-                Infrastructure Verified
-            </label><br>
+                <button type="button"
+                        onclick="startCamera()">
+                    Start Camera
+                </button>
 
-            <label>
-                <input type="checkbox"
-                       name="checklist"
-                       value="Staff Available">
-                Staff Available
-            </label><br>
+                <button type="button"
+                        onclick="captureVerification()">
+                    Capture Verification Photo
+                </button>
 
-            <label>
-                <input type="checkbox"
-                       name="checklist"
-                       value="Beneficiary Services Verified">
-                Beneficiary Services Verified
-            </label><br>
+                <canvas id="canvas"
+                        style="display:none;"></canvas>
 
-            <label>
-                <input type="checkbox"
-                       name="checklist"
-                       value="Records Verified">
-                Records Verified
-            </label><br>
+                <p id="identityStatus"></p>
 
-            <label>
-                <input type="checkbox"
-                       name="checklist"
-                       value="Attendance Verified">
-                Attendance Verified
-            </label>
+                <h3>📍 GPS Location</h3>
 
-            <h3>📸 Photo Evidence</h3>
-            <input type="file"
-                   name="evidence"
-                   accept="image/*">
+                <button type="button"
+                        onclick="getLocation()">
+                    Capture Current Location
+                </button>
 
-            <h3>📝 Remarks</h3>
-            <textarea name="remarks"
-                      placeholder="Enter inspection observations"></textarea>
+                <p id="locationStatus"></p>
 
-            <button type="submit">
-                ✅ Submit Inspection Report
-            </button>
+                <h3>📋 Inspection Checklist</h3>
 
-        </form>
-    </div>
+                <label>
+                    <input type="checkbox"
+                           name="checklist"
+                           value="Infrastructure Verified">
+                    Infrastructure Verified
+                </label><br>
 
-    <script>
-    let stream;
+                <label>
+                    <input type="checkbox"
+                           name="checklist"
+                           value="Staff Available">
+                    Staff Available
+                </label><br>
 
-    async function startCamera() {{
-        try {{
-            stream = await navigator.mediaDevices.getUserMedia({{
-                video: {{ facingMode: "user" }},
-                audio: false
-            }});
+                <label>
+                    <input type="checkbox"
+                           name="checklist"
+                           value="Beneficiary Services Verified">
+                    Beneficiary Services Verified
+                </label><br>
 
-            document.getElementById("video").srcObject = stream;
+                <label>
+                    <input type="checkbox"
+                           name="checklist"
+                           value="Records Verified">
+                    Records Verified
+                </label><br>
 
-        }} catch(error) {{
-            document.getElementById("faceStatus").innerText =
-                "❌ Camera permission is required.";
-        }}
-    }}
+                <label>
+                    <input type="checkbox"
+                           name="checklist"
+                           value="Attendance Verified">
+                    Attendance Verified
+                </label>
 
-    function captureVerification() {{
-        const video = document.getElementById("video");
-        const canvas = document.getElementById("canvas");
+                <h3>📸 Evidence Upload</h3>
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+                <input type="file"
+                       name="evidence"
+                       accept="image/*">
 
-        canvas.getContext("2d").drawImage(
-            video, 0, 0,
-            canvas.width, canvas.height
-        );
+                <h3>📝 Remarks</h3>
 
-        document.getElementById("verification_photo").value =
-            canvas.toDataURL("image/jpeg", 0.9);
+                <textarea name="remarks"
+                          placeholder="Enter observations">
+                </textarea>
 
-        document.getElementById("faceStatus").innerText =
-            "✅ Live verification photo captured.";
+                <button>Submit Secure Inspection Report</button>
 
-        if(stream) {{
-            stream.getTracks().forEach(track => track.stop());
-        }}
-    }}
+            </form>
+        </div>
 
-    function getLocation() {{
-        if (!navigator.geolocation) {{
-            document.getElementById("locationStatus").innerText =
-                "❌ GPS is not supported by this browser.";
-            return;
-        }}
+        <script>
+        async function startCamera() {{
+            try {{
+                const stream =
+                    await navigator.mediaDevices.getUserMedia({{
+                        video: true
+                    }});
 
-        navigator.geolocation.getCurrentPosition(
-            function(position) {{
-                document.getElementById("latitude").value =
-                    position.coords.latitude;
+                document.getElementById('camera').srcObject = stream;
 
-                document.getElementById("longitude").value =
-                    position.coords.longitude;
-
-                document.getElementById("locationStatus").innerText =
-                    "✅ GPS location captured successfully.";
-            }},
-            function() {{
-                document.getElementById("locationStatus").innerText =
-                    "⚠️ Unable to capture location.";
+            }} catch(error) {{
+                document.getElementById('identityStatus').innerHTML =
+                    '⚠️ Camera permission is required.';
             }}
-        );
-    }}
-    </script>
+        }}
+
+        function captureVerification() {{
+            const video =
+                document.getElementById('camera');
+
+            const canvas =
+                document.getElementById('canvas');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            canvas.getContext('2d').drawImage(
+                video, 0, 0,
+                canvas.width, canvas.height
+            );
+
+            document.getElementById('verification_photo').value =
+                canvas.toDataURL('image/jpeg');
+
+            document.getElementById('identityStatus').innerHTML =
+                '✅ Current identity photo captured';
+        }}
+
+        function getLocation() {{
+            if (!navigator.geolocation) {{
+                document.getElementById('locationStatus').innerHTML =
+                    '⚠️ GPS is not supported.';
+                return;
+            }}
+
+            navigator.geolocation.getCurrentPosition(
+                function(position) {{
+                    document.getElementById('latitude').value =
+                        position.coords.latitude;
+
+                    document.getElementById('longitude').value =
+                        position.coords.longitude;
+
+                    document.getElementById('locationStatus').innerHTML =
+                        '✅ GPS location captured';
+                }},
+                function() {{
+                    document.getElementById('locationStatus').innerHTML =
+                        '⚠️ Unable to capture location.';
+                }}
+            );
+        }}
+        </script>
     """)
 
 
 # ============================================================
-# STAFF WORK / ISSUE REPORTING
+# STAFF WORK / ISSUE REPORT
 # ============================================================
 
 @app.route("/staff-report", methods=["GET", "POST"])
@@ -1518,82 +1415,78 @@ def staff_report():
 
     if request.method == "POST":
 
+        title = request.form.get("title")
+        description = request.form.get("description")
+        severity = request.form.get("severity")
+
         conn = get_db()
 
         conn.execute("""
             INSERT INTO issues(
-                project_id,reported_by,title,description,
-                severity,status,created_at
+                reported_by, title, description,
+                severity, status, created_at
             )
-            VALUES(?,?,?,?,?,?,?)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
-            request.form.get("project_id") or None,
             session["user_id"],
-            request.form.get("title"),
-            request.form.get("description"),
-            request.form.get("severity"),
+            title,
+            description,
+            severity,
             "Open",
-            now()
+            datetime.now().strftime("%Y-%m-%d %H:%M")
         ))
+
+        admins = conn.execute("""
+            SELECT id FROM users
+            WHERE role IN ('admin', 'official')
+        """).fetchall()
 
         conn.commit()
         conn.close()
 
-        notify_role(
-            "admin",
-            f"⚠️ New issue reported: "
-            f"{request.form.get('title')}"
-        )
+        for admin in admins:
+            notify(
+                admin["id"],
+                f"⚠️ New issue reported: {title}"
+            )
 
         return redirect(url_for("issues"))
 
-    conn = get_db()
+    return page("Staff Work", """
+        <div class="card">
+            <h1>🛠️ Project Staff Work & Issue Report</h1>
 
-    projects_list = conn.execute(
-        "SELECT * FROM projects"
-    ).fetchall()
+            <p>
+                Project staff can report field issues and
+                operational problems directly to authorities.
+            </p>
 
-    conn.close()
+            <form method="POST">
 
-    options = "".join(
-        f"<option value='{p['id']}'>{p['name']}</option>"
-        for p in projects_list
-    )
+                <input name="title"
+                       placeholder="Issue Title"
+                       required>
 
-    return page("Staff Report", f"""
-    <div class="card">
-        <h1>🛠️ Project Staff Work & Issue Report</h1>
+                <select name="severity">
+                    <option>Low</option>
+                    <option selected>Medium</option>
+                    <option>High</option>
+                    <option>Critical</option>
+                </select>
 
-        <form method="POST">
+                <textarea name="description"
+                          placeholder="Describe the issue"
+                          required></textarea>
 
-            <select name="project_id">
-                <option value="">Select Project (Optional)</option>
-                {options}
-            </select>
+                <button>Submit Report</button>
 
-            <input name="title"
-                   placeholder="Issue Title"
-                   required>
-
-            <select name="severity">
-                <option>Low</option>
-                <option selected>Medium</option>
-                <option>High</option>
-                <option>Critical</option>
-            </select>
-
-            <textarea name="description"
-                      placeholder="Describe the issue"
-                      required></textarea>
-
-            <button>Submit Report</button>
-        </form>
-    </div>
+            </form>
+        </div>
     """)
 
 
 # ============================================================
-# ISSUE RESOLUTION
+# ISSUES
 # ============================================================
 
 @app.route("/issues", methods=["GET", "POST"])
@@ -1604,32 +1497,32 @@ def issues():
 
     if (
         request.method == "POST" and
-        session["role"] in ["admin", "official", "inspector"]
+        session.get("role") in ["admin", "official", "inspector"]
     ):
+
+        issue_id = request.form.get("issue_id")
+        resolution = request.form.get("resolution")
+
         conn.execute("""
             UPDATE issues
-            SET status='Resolved', resolution=?
+            SET status='Resolved',
+                resolution=?
             WHERE id=?
-        """, (
-            request.form.get("resolution"),
-            request.form.get("issue_id")
-        ))
+        """, (resolution, issue_id))
 
         conn.commit()
 
     issue_list = conn.execute("""
-        SELECT
-            issues.*,
-            users.name AS reporter_name
+        SELECT issues.*, users.name AS reporter_name
         FROM issues
         LEFT JOIN users
-            ON users.id=issues.reported_by
+            ON issues.reported_by = users.id
         ORDER BY issues.id DESC
     """).fetchall()
 
     conn.close()
 
-    html = "<h1>⚠️ Issue Verification & Resolution</h1>"
+    content = "<h1>⚠️ Issue Verification & Resolution</h1>"
 
     for issue in issue_list:
 
@@ -1637,7 +1530,7 @@ def issues():
 
         if (
             issue["status"] != "Resolved" and
-            session["role"] in
+            session.get("role") in
             ["admin", "official", "inspector"]
         ):
             action = f"""
@@ -1654,28 +1547,34 @@ def issues():
             </form>
             """
 
-        html += f"""
+        content += f"""
         <div class="card">
-            <h3>
-                {issue["title"]} — {issue["severity"]}
-            </h3>
+            <h3>{issue['title']} — {issue['severity']}</h3>
 
-            <p>{issue["description"]}</p>
+            <p>{issue['description']}</p>
+
             <p>
                 <b>Reported by:</b>
-                {issue["reporter_name"] or "Unknown"}
+                {issue['reporter_name'] or 'Unknown'}
             </p>
-            <p><b>Status:</b> {issue["status"]}</p>
+
+            <p>
+                <b>Status:</b>
+                {issue['status']}
+            </p>
 
             {action}
         </div>
         """
 
-    return page("Issues", html)
+    if not issue_list:
+        content += "<div class='card'>No issues reported.</div>"
+
+    return page("Issues", content)
 
 
 # ============================================================
-# ATTENDANCE + GPS + CAMERA
+# ATTENDANCE
 # ============================================================
 
 @app.route("/attendance", methods=["GET", "POST"])
@@ -1686,96 +1585,43 @@ def attendance():
 
     if request.method == "POST":
 
-        verification_photo = save_camera_image(
-            request.form.get("camera_photo")
+        photo = save_camera_image(
+            request.form.get("attendance_photo")
         )
-
-        if not verification_photo:
-            conn.close()
-            return page(
-                "Attendance",
-                """
-                <div class="card danger">
-                    <h2>📷 Camera Verification Required</h2>
-                    <p>
-                        Capture a live identity photo before
-                        marking attendance.
-                    </p>
-                </div>
-                """
-            )
-
-        existing = conn.execute("""
-            SELECT id FROM attendance
-            WHERE user_id=? AND attendance_date=?
-        """, (
-            session["user_id"],
-            today()
-        )).fetchone()
-
-        if existing:
-            conn.close()
-            return page(
-                "Attendance",
-                """
-                <div class="card warning">
-                    <h2>Attendance Already Marked</h2>
-                    <p>You have already marked attendance today.</p>
-                    <a class="btn" href="/attendance">Back</a>
-                </div>
-                """
-            )
 
         conn.execute("""
             INSERT INTO attendance(
-                user_id,project_id,latitude,longitude,
-                photo,verification_status,
-                attendance_date,status
+                user_id, project_id, latitude,
+                longitude, photo, attendance_date, status
             )
-            VALUES(?,?,?,?,?,?,?,?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             session["user_id"],
-            request.form.get("project_id") or None,
+            request.form.get("project_id"),
             request.form.get("latitude"),
             request.form.get("longitude"),
-            verification_photo,
-            "Live Photo Captured",
-            today(),
+            photo,
+            datetime.now().strftime("%Y-%m-%d"),
             "Present"
         ))
 
-        conn.execute("""
-            INSERT INTO face_verifications(
-                user_id,action,photo,verification_status,created_at
-            )
-            VALUES(?,?,?,?,?)
-        """, (
-            session["user_id"],
-            "Attendance",
-            verification_photo,
-            "Captured",
-            now()
-        ))
-
         conn.commit()
-        conn.close()
-
-        return redirect(url_for("attendance"))
 
     projects_list = conn.execute(
         "SELECT * FROM projects"
     ).fetchall()
 
     records = conn.execute("""
-        SELECT
-            a.*,
-            u.name AS user_name,
-            p.name AS project_name
-        FROM attendance a
-        LEFT JOIN users u ON u.id=a.user_id
-        LEFT JOIN projects p ON p.id=a.project_id
-        ORDER BY a.id DESC
-        LIMIT 30
+        SELECT attendance.*,
+               users.name AS user_name,
+               projects.name AS project_name
+        FROM attendance
+        LEFT JOIN users
+            ON attendance.user_id = users.id
+        LEFT JOIN projects
+            ON attendance.project_id = projects.id
+        ORDER BY attendance.id DESC
+        LIMIT 20
     """).fetchall()
 
     conn.close()
@@ -1786,273 +1632,147 @@ def attendance():
     )
 
     rows = "".join(f"""
-    <tr>
-        <td>{r["user_name"]}</td>
-        <td>{r["project_name"] or "-"}</td>
-        <td>{r["attendance_date"]}</td>
-        <td>{r["status"]}</td>
-        <td>{r["verification_status"]}</td>
-    </tr>
-    """ for r in records)
+        <tr>
+            <td>{record['user_name']}</td>
+            <td>{record['project_name'] or '-'}</td>
+            <td>{record['attendance_date']}</td>
+            <td>{record['status']}</td>
+        </tr>
+    """ for record in records)
 
     return page("Attendance", f"""
-    <h1>👥 Smart Attendance Management</h1>
+        <h1>👥 Smart Attendance Management</h1>
 
-    <div class="card">
-        <form method="POST">
-
-            <select name="project_id">
-                <option value="">Select Project</option>
-                {options}
-            </select>
-
-            <input type="hidden"
-                   id="alatitude"
-                   name="latitude">
-
-            <input type="hidden"
-                   id="alongitude"
-                   name="longitude">
-
-            <input type="hidden"
-                   id="camera_photo"
-                   name="camera_photo">
-
-            <button type="button"
-                    onclick="attendanceLocation()">
-                📍 Capture GPS
-            </button>
-
-            <p id="attendanceStatus"></p>
-
-            <h3>📷 Live Identity Capture</h3>
-
-            <video id="video"
-                   autoplay
-                   playsinline></video>
-
-            <canvas id="canvas"
-                    style="display:none;"></canvas>
-
-            <br>
-
-            <button type="button"
-                    onclick="startAttendanceCamera()">
-                Start Camera
-            </button>
-
-            <button type="button"
-                    onclick="captureAttendance()">
-                Capture Identity
-            </button>
-
-            <p id="cameraStatus"></p>
-
-            <button type="submit">
-                ✅ Mark Attendance
-            </button>
-
-        </form>
-    </div>
-
-    <div class="card">
-        <table>
-            <tr>
-                <th>User</th>
-                <th>Project</th>
-                <th>Date</th>
-                <th>Status</th>
-                <th>Verification</th>
-            </tr>
-            {rows or
-             "<tr><td colspan='5'>No attendance records.</td></tr>"}
-        </table>
-    </div>
-
-    <script>
-    let attendanceStream;
-
-    async function startAttendanceCamera() {{
-        try {{
-            attendanceStream =
-                await navigator.mediaDevices.getUserMedia({{
-                    video: {{ facingMode: "user" }},
-                    audio: false
-                }});
-
-            document.getElementById("video").srcObject =
-                attendanceStream;
-
-        }} catch(error) {{
-            document.getElementById("cameraStatus").innerText =
-                "❌ Camera permission required.";
-        }}
-    }}
-
-    function captureAttendance() {{
-        const video = document.getElementById("video");
-        const canvas = document.getElementById("canvas");
-
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-
-        canvas.getContext("2d").drawImage(
-            video, 0, 0,
-            canvas.width, canvas.height
-        );
-
-        document.getElementById("camera_photo").value =
-            canvas.toDataURL("image/jpeg", 0.9);
-
-        document.getElementById("cameraStatus").innerText =
-            "✅ Identity photo captured.";
-
-        if(attendanceStream) {{
-            attendanceStream.getTracks().forEach(
-                track => track.stop()
-            );
-        }}
-    }}
-
-    function attendanceLocation() {{
-        navigator.geolocation.getCurrentPosition(
-            function(position) {{
-                document.getElementById("alatitude").value =
-                    position.coords.latitude;
-
-                document.getElementById("alongitude").value =
-                    position.coords.longitude;
-
-                document.getElementById("attendanceStatus").innerText =
-                    "✅ GPS location captured.";
-            }},
-            function() {{
-                document.getElementById("attendanceStatus").innerText =
-                    "⚠️ Unable to capture GPS.";
-            }}
-        );
-    }}
-    </script>
-    """)
-
-
-# ============================================================
-# MEETINGS / VIDEO CONFERENCING
-# ============================================================
-
-@app.route("/meetings", methods=["GET", "POST"])
-@login_required
-def meetings():
-
-    conn = get_db()
-
-    if (
-        request.method == "POST" and
-        session["role"] in ["admin", "official"]
-    ):
-
-        conn.execute("""
-            INSERT INTO meetings(
-                project_id,title,meeting_url,
-                meeting_time,created_at
-            )
-            VALUES(?,?,?,?,?)
-        """, (
-            request.form.get("project_id"),
-            request.form.get("title"),
-            request.form.get("meeting_url"),
-            request.form.get("meeting_time"),
-            now()
-        ))
-
-        conn.commit()
-
-        notify_role(
-            "staff",
-            f"🎥 A new meeting has been scheduled: "
-            f"{request.form.get('title')}"
-        )
-
-    meeting_list = conn.execute("""
-        SELECT
-            m.*,
-            p.name AS project_name
-        FROM meetings m
-        LEFT JOIN projects p ON p.id=m.project_id
-        ORDER BY m.meeting_time DESC
-    """).fetchall()
-
-    projects_list = conn.execute(
-        "SELECT * FROM projects"
-    ).fetchall()
-
-    conn.close()
-
-    form = ""
-
-    if session["role"] in ["admin", "official"]:
-
-        options = "".join(
-            f"<option value='{p['id']}'>{p['name']}</option>"
-            for p in projects_list
-        )
-
-        form = f"""
         <div class="card">
-            <h2>➕ Schedule Monitoring / VC Meeting</h2>
 
             <form method="POST">
+
                 <select name="project_id">
                     {options}
                 </select>
 
-                <input name="title"
-                       placeholder="Meeting Title"
-                       required>
+                <input type="hidden"
+                       name="latitude"
+                       id="alatitude">
 
-                <input name="meeting_url"
-                       placeholder="VC Meeting Link">
+                <input type="hidden"
+                       name="longitude"
+                       id="alongitude">
 
-                <input type="datetime-local"
-                       name="meeting_time"
-                       required>
+                <input type="hidden"
+                       name="attendance_photo"
+                       id="attendance_photo">
 
-                <button>Schedule Meeting</button>
+                <h3>📷 Live Attendance Photo</h3>
+
+                <video id="attendanceCamera"
+                       autoplay
+                       playsinline></video>
+
+                <br>
+
+                <button type="button"
+                        onclick="startAttendanceCamera()">
+                    Start Camera
+                </button>
+
+                <button type="button"
+                        onclick="captureAttendance()">
+                    Capture Photo
+                </button>
+
+                <canvas id="attendanceCanvas"
+                        style="display:none;"></canvas>
+
+                <p id="attendancePhotoStatus"></p>
+
+                <button type="button"
+                        onclick="attendanceLocation()">
+                    📍 Capture GPS
+                </button>
+
+                <p id="attendanceStatus"></p>
+
+                <button>Mark Attendance</button>
+
             </form>
         </div>
-        """
 
-    cards = ""
-
-    for meeting in meeting_list:
-
-        join_button = ""
-
-        if meeting["meeting_url"]:
-            join_button = f"""
-            <a class="btn"
-               target="_blank"
-               href="{meeting["meeting_url"]}">
-                🎥 Join Meeting
-            </a>
-            """
-
-        cards += f"""
         <div class="card">
-            <h3>🎥 {meeting["title"]}</h3>
-            <p>🏢 {meeting["project_name"] or "-"}</p>
-            <p>🕒 {meeting["meeting_time"]}</p>
-            {join_button}
+
+            <h2>Recent Attendance</h2>
+
+            <table>
+                <tr>
+                    <th>User</th>
+                    <th>Project</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                </tr>
+
+                {rows}
+            </table>
         </div>
-        """
 
-    return page("Meetings", f"""
-    <h1>🎥 Meeting & VC Coordination</h1>
+        <script>
+        async function startAttendanceCamera() {{
+            try {{
+                const stream =
+                    await navigator.mediaDevices.getUserMedia({{
+                        video: true
+                    }});
 
-    {form}
+                document.getElementById('attendanceCamera').srcObject =
+                    stream;
+            }} catch(error) {{
+                document.getElementById(
+                    'attendancePhotoStatus'
+                ).innerHTML = '⚠️ Camera permission denied.';
+            }}
+        }}
 
-    {cards or
-     "<div class='card'>No meetings scheduled.</div>"}
+        function captureAttendance() {{
+            const video =
+                document.getElementById('attendanceCamera');
+
+            const canvas =
+                document.getElementById('attendanceCanvas');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            canvas.getContext('2d').drawImage(
+                video, 0, 0,
+                canvas.width, canvas.height
+            );
+
+            document.getElementById('attendance_photo').value =
+                canvas.toDataURL('image/jpeg');
+
+            document.getElementById(
+                'attendancePhotoStatus'
+            ).innerHTML = '✅ Attendance photo captured';
+        }}
+
+        function attendanceLocation() {{
+            navigator.geolocation.getCurrentPosition(
+                function(position) {{
+                    document.getElementById('alatitude').value =
+                        position.coords.latitude;
+
+                    document.getElementById('alongitude').value =
+                        position.coords.longitude;
+
+                    document.getElementById('attendanceStatus').innerHTML =
+                        '✅ GPS captured';
+                }},
+                function() {{
+                    document.getElementById('attendanceStatus').innerHTML =
+                        '⚠️ GPS permission required.';
+                }}
+            );
+        }}
+        </script>
     """)
 
 
@@ -2081,22 +1801,16 @@ def notifications():
     conn.commit()
     conn.close()
 
-    cards = ""
-
-    for note in notes:
-        cards += f"""
+    cards = "".join(f"""
         <div class="card">
-            <b>🔔 {note["message"]}</b>
-            <br>
-            <small>{note["created_at"]}</small>
+            <b>🔔 {note['message']}</b><br>
+            <small>{note['created_at']}</small>
         </div>
-        """
+    """ for note in notes)
 
     return page("Notifications", f"""
-    <h1>🔔 Notifications & Alerts</h1>
-
-    {cards or
-     "<div class='card'>No notifications yet.</div>"}
+        <h1>🔔 Notifications & Alerts</h1>
+        {cards or "<div class='card'>No notifications yet.</div>"}
     """)
 
 
@@ -2113,11 +1827,13 @@ def notification_count():
 
     conn.close()
 
-    return jsonify({"unread_notifications": count})
+    return jsonify({
+        "unread_notifications": count
+    })
 
 
 # ============================================================
-# RULE-BASED ANALYTICS
+# ANALYTICS
 # ============================================================
 
 @app.route("/analytics")
@@ -2133,12 +1849,11 @@ def analytics():
     critical = conn.execute("""
         SELECT COUNT(*) FROM issues
         WHERE severity='Critical'
-        AND status!='Resolved'
     """).fetchone()[0]
 
     open_issues = conn.execute("""
         SELECT COUNT(*) FROM issues
-        WHERE status!='Resolved'
+        WHERE status != 'Resolved'
     """).fetchone()[0]
 
     completed = conn.execute("""
@@ -2176,35 +1891,248 @@ def analytics():
     )
 
     return page("Analytics", f"""
-    <h1>📈 Rule-Based Analytics</h1>
+        <h1>📈 Rule-Based Analytics</h1>
 
-    <div class="grid">
-        <div class="stat">
-            <h2>{total_issues}</h2>
-            Total Issues
+        <div class="grid">
+            <div class="stat">
+                <h2>{total_issues}</h2>
+                Total Issues
+            </div>
+
+            <div class="stat">
+                <h2>{critical}</h2>
+                Critical Issues
+            </div>
+
+            <div class="stat">
+                <h2>{open_issues}</h2>
+                Open Issues
+            </div>
+
+            <div class="stat">
+                <h2>{completed}</h2>
+                Completed Inspections
+            </div>
         </div>
 
-        <div class="stat">
-            <h2>{critical}</h2>
-            Critical Issues
+        <div class="card">
+            <h2>🤖 Smart System Alerts</h2>
+            {alert_html}
         </div>
-
-        <div class="stat">
-            <h2>{open_issues}</h2>
-            Open Issues
-        </div>
-
-        <div class="stat">
-            <h2>{completed}</h2>
-            Completed Inspections
-        </div>
-    </div>
-
-    <div class="card">
-        <h2>🤖 Smart System Alerts</h2>
-        {alert_html}
-    </div>
     """)
+
+
+# ============================================================
+# IDENTITY PROFILE
+# ============================================================
+
+@app.route("/profile")
+@login_required
+def profile():
+
+    conn = get_db()
+
+    user = conn.execute("""
+        SELECT * FROM users WHERE id=?
+    """, (session["user_id"],)).fetchone()
+
+    conn.close()
+
+    photo_html = """
+        <p class="warning">
+            No identity photo registered.
+        </p>
+    """
+
+    if user["identity_photo"]:
+        photo_html = f"""
+            <img src="/uploads/{user['identity_photo']}"
+                 style="max-width:250px;border-radius:12px;">
+        """
+
+    verification = (
+        "✅ Identity photo registered"
+        if user["identity_verified"]
+        else "⚠️ Identity photo not registered"
+    )
+
+    return page("Profile", f"""
+        <div class="card">
+            <h1>👤 Identity Profile</h1>
+
+            <p><b>Name:</b> {user['name']}</p>
+            <p><b>Email:</b> {user['email']}</p>
+            <p><b>Role:</b> {user['role'].upper()}</p>
+            <p><b>Status:</b> {verification}</p>
+
+            <h3>Registered Identity Photo</h3>
+            {photo_html}
+
+            <p class="warning">
+                🔐 Identity photos are captured as part of
+                the security and verification workflow.
+                This prototype does not perform automated
+                AI biometric matching.
+            </p>
+        </div>
+    """)
+
+
+# ============================================================
+# UPLOAD FILES
+# ============================================================
+
+@app.route("/uploads/<path:filename>")
+@login_required
+def uploaded_file(filename):
+    return send_from_directory(
+        app.config["UPLOAD_FOLDER"],
+        filename
+    )
+
+
+# ============================================================
+# MEETINGS / VC
+# ============================================================
+
+@app.route("/meetings", methods=["GET", "POST"])
+@login_required
+def meetings():
+
+    conn = get_db()
+
+    if (
+        request.method == "POST" and
+        session.get("role") in ["admin", "official"]
+    ):
+
+        conn.execute("""
+            INSERT INTO meetings(
+                project_id, title, meeting_url,
+                meeting_time, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            request.form.get("project_id"),
+            request.form.get("title"),
+            request.form.get("meeting_url"),
+            request.form.get("meeting_time"),
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ))
+
+        conn.commit()
+
+    meetings_list = conn.execute("""
+        SELECT meetings.*, projects.name AS project_name
+        FROM meetings
+        LEFT JOIN projects
+            ON meetings.project_id = projects.id
+        ORDER BY meetings.id DESC
+    """).fetchall()
+
+    projects_list = conn.execute(
+        "SELECT * FROM projects"
+    ).fetchall()
+
+    conn.close()
+
+    form = ""
+
+    if session.get("role") in ["admin", "official"]:
+
+        options = "".join(
+            f"<option value='{p['id']}'>{p['name']}</option>"
+            for p in projects_list
+        )
+
+        form = f"""
+        <div class="card">
+            <h2>➕ Schedule Monitoring / VC Meeting</h2>
+
+            <form method="POST">
+
+                <select name="project_id">
+                    {options}
+                </select>
+
+                <input name="title"
+                       placeholder="Meeting Title"
+                       required>
+
+                <input name="meeting_url"
+                       placeholder="Meeting URL">
+
+                <input type="datetime-local"
+                       name="meeting_time"
+                       required>
+
+                <button>Schedule Meeting</button>
+
+            </form>
+        </div>
+        """
+
+    cards = ""
+
+    for meeting in meetings_list:
+
+        join = ""
+
+        if meeting["meeting_url"]:
+            join = f"""
+                <a class="btn"
+                   href="{meeting['meeting_url']}"
+                   target="_blank">
+                   Join Meeting
+                </a>
+            """
+
+        cards += f"""
+        <div class="card">
+            <h3>🎥 {meeting['title']}</h3>
+            <p>🏢 {meeting['project_name'] or '-'}</p>
+            <p>🕒 {meeting['meeting_time']}</p>
+            {join}
+        </div>
+        """
+
+    return page("Meetings", f"""
+        <h1>🎥 Meeting & VC Coordination</h1>
+
+        {form}
+
+        {cards or "<div class='card'>No meetings scheduled.</div>"}
+    """)
+
+
+# ============================================================
+# ERROR HANDLERS
+# ============================================================
+
+@app.errorhandler(413)
+def file_too_large(error):
+    return page(
+        "File Too Large",
+        """
+        <div class="card">
+            <h2>⚠️ File Too Large</h2>
+            <p>Please upload a file smaller than 10 MB.</p>
+        </div>
+        """
+    ), 413
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return page(
+        "Page Not Found",
+        """
+        <div class="card">
+            <h2>404 - Page Not Found</h2>
+            <a class="btn" href="/">Go Home</a>
+        </div>
+        """
+    ), 404
 
 
 # ============================================================
@@ -2215,8 +2143,10 @@ init_db()
 
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
+        port=port,
         debug=False
     )
