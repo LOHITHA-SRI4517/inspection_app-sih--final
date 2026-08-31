@@ -899,102 +899,112 @@ def logout():
 # ============================================================
 # DASHBOARD
 # ============================================================
-
 @app.route("/dashboard")
 @login_required
 def dashboard():
-
     conn = get_db()
 
-    projects = conn.execute(
-        "SELECT COUNT(*) FROM projects"
-    ).fetchone()[0]
+    try:
+        # Basic statistics
+        total_projects = conn.execute(
+            "SELECT COUNT(*) FROM projects"
+        ).fetchone()[0]
 
-    inspections = conn.execute(
-        "SELECT COUNT(*) FROM inspections"
-    ).fetchone()[0]
+        total_inspections = conn.execute(
+            "SELECT COUNT(*) FROM inspections"
+        ).fetchone()[0]
 
-    issues_count = conn.execute("""
-        SELECT COUNT(*)
-        FROM issues
-        WHERE status != 'Resolved'
-    """).fetchone()[0]
+        open_issues = conn.execute(
+            "SELECT COUNT(*) FROM issues WHERE status != 'Resolved'"
+        ).fetchone()[0]
 
-    attendance_count = conn.execute("""
-        SELECT COUNT(*)
-        FROM attendance
-        WHERE attendance_date=?
-    """, (
-        datetime.now().strftime("%Y-%m-%d"),
-    )).fetchone()[0]
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_attendance = conn.execute(
+            "SELECT COUNT(*) FROM attendance WHERE attendance_date=?",
+            (today,)
+        ).fetchone()[0]
 
-    recent = conn.execute("""
-        SELECT i.*, p.name project_name
-        FROM inspections i
-        LEFT JOIN projects p ON i.project_id=p.id
-        ORDER BY i.id DESC
-        LIMIT 5
-    """).fetchall()
+        # Recent inspections with project details
+        recent_inspections = conn.execute("""
+            SELECT inspections.*,
+                   projects.name AS project_name,
+                   users.name AS inspector_name
+            FROM inspections
+            LEFT JOIN projects
+                ON inspections.project_id = projects.id
+            LEFT JOIN users
+                ON inspections.inspector_id = users.id
+            ORDER BY inspections.id DESC
+            LIMIT 5
+        """).fetchall()
 
-    conn.close()
+        conn.close()
 
-    rows = "".join(
-        f"""
+    except sqlite3.Error as e:
+        conn.close()
+        return f"""
+        <h2>Database Dashboard Error</h2>
+        <p>{str(e)}</p>
+        """, 500
+
+    inspection_rows = ""
+
+    for item in recent_inspections:
+        inspection_rows += f"""
         <tr>
-            <td>{r['title']}</td>
-            <td>{r['project_name'] or 'Not Assigned'}</td>
-            <td>{r['status']}</td>
+            <td>{item['title'] or 'Inspection'}</td>
+            <td>{item['project_name'] or 'Not Assigned'}</td>
+            <td>{item['inspector_name'] or 'Not Assigned'}</td>
+            <td>{item['status']}</td>
         </tr>
         """
-        for r in recent
-    )
+
+    if not inspection_rows:
+        inspection_rows = """
+        <tr>
+            <td colspan="4">No inspection records available.</td>
+        </tr>
+        """
 
     return page("Dashboard", f"""
+        <h1>📊 Real-Time Monitoring Dashboard</h1>
 
-    <h1>📊 Real-Time Monitoring Dashboard</h1>
+        <div class="grid">
+            <div class="stat">
+                <h2>{total_projects}</h2>
+                🏢 Projects / Institutes
+            </div>
 
-    <div class="grid">
+            <div class="stat">
+                <h2>{total_inspections}</h2>
+                📋 Total Inspections
+            </div>
 
-        <div class="stat">
-            <h2>{projects}</h2>
-            🏢 Projects / Institutes
+            <div class="stat">
+                <h2>{open_issues}</h2>
+                ⚠️ Open Issues
+            </div>
+
+            <div class="stat">
+                <h2>{today_attendance}</h2>
+                👥 Today's Attendance
+            </div>
         </div>
 
-        <div class="stat">
-            <h2>{inspections}</h2>
-            📋 Total Inspections
+        <div class="card">
+            <h2>📋 Recent Inspection Activity</h2>
+
+            <table>
+                <tr>
+                    <th>Inspection</th>
+                    <th>Project</th>
+                    <th>Inspector</th>
+                    <th>Status</th>
+                </tr>
+                {inspection_rows}
+            </table>
         </div>
-
-        <div class="stat">
-            <h2>{issues_count}</h2>
-            ⚠️ Open Issues
-        </div>
-
-        <div class="stat">
-            <h2>{attendance_count}</h2>
-            👥 Today's Attendance
-        </div>
-
-    </div>
-
-    <div class="card">
-
-        <h2>Recent Inspection Activity</h2>
-
-        <table>
-            <tr>
-                <th>Inspection</th>
-                <th>Project</th>
-                <th>Status</th>
-            </tr>
-
-            {rows or "<tr><td colspan='3'>No inspections yet.</td></tr>"}
-
-        </table>
-
-    </div>
     """)
-
 
 # ============================================================
 # PROJECT MANAGEMENT
